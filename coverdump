@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 #Audio Tools, a module and set of tools for manipulating audio data
-#Copyright (C) 2007-2011  Brian Langenberger
+#Copyright (C) 2007-2012  Brian Langenberger
 
 #This program is free software; you can redistribute it and/or modify
 #it under the terms of the GNU General Public License as published by
@@ -18,63 +18,66 @@
 #Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
 
-import audiotools
 import sys
 import os
 import os.path
-import gettext
-
-gettext.install("audiotools", unicode=True)
+import audiotools
+import audiotools.text as _
 
 FILENAME_TYPES = ("front_cover", "back_cover", "leaflet", "media", "other")
 
 if (__name__ == '__main__'):
     parser = audiotools.OptionParser(
-        usage=_(u'%prog [-d directory] <track>'),
+        usage=_.USAGE_COVERDUMP,
         version="Python Audio Tools %s" % (audiotools.VERSION))
-
-    parser.add_option('-V', '--verbose',
-                      action='store',
-                      dest='verbosity',
-                      choices=audiotools.VERBOSITY_LEVELS,
-                      default=audiotools.DEFAULT_VERBOSITY,
-                      help=_(u'the verbosity level to execute at'))
 
     parser.add_option('-d', '--dir',
                       action='store',
                       type='string',
                       dest='dir',
                       default='.',
-                      help=_(u'the directory to store extracted images'))
+                      help=_.OPT_DIR_IMAGES)
 
     parser.add_option('-p', '--prefix',
                       action='store',
                       dest='prefix',
                       default="",
-                      help=_(u'add a prefix to the output image'))
+                      help=_.OPT_PREFIX)
+
+    parser.add_option('-V', '--verbose',
+                      action='store',
+                      dest='verbosity',
+                      choices=audiotools.VERBOSITY_LEVELS,
+                      default=audiotools.DEFAULT_VERBOSITY,
+                      help=_.OPT_VERBOSE)
 
     (options, args) = parser.parse_args()
     msg = audiotools.Messenger("coverdump", options)
 
     if (len(args) != 1):
-        msg.error(_(u"You must specify exactly 1 supported audio file"))
+        msg.error(_.ERR_1_FILE_REQUIRED)
         sys.exit(1)
+    else:
+        input_filename = audiotools.Filename(args[0])
 
     try:
-        audiofile = audiotools.open(args[0])
+        audiofile = audiotools.open(str(input_filename))
     except audiotools.UnsupportedFile:
-        msg.error(_(u"%s file format not supported") % msg.filename(args[0]))
+        msg.error(_.ERR_1_FILE_REQUIRED)
         sys.exit(1)
     except IOError:
-        msg.error(_(u"Unable to open \"%s\"") % (msg.filename(args[0])))
+        msg.error(_.ERR_OPEN_IOERROR % (audiotools.Filename(args[0]),))
         sys.exit(1)
 
     metadata = audiofile.get_metadata()
     if (metadata is not None):
+        #divide images by type (front cover, leaflet page, etc.)
         image_types = {}
         for image in metadata.images():
             image_types.setdefault(image.type, []).append(image)
 
+        #build a set of (Image, Filename) tuples to be extracted
+        output_images = []
         for (type, images) in image_types.items():
             if (len(images) != 1):
                 FILE_TEMPLATE = \
@@ -84,25 +87,43 @@ if (__name__ == '__main__'):
                     "%(prefix)s%(filename)s.%(suffix)s"
 
             for (i, image) in enumerate(images):
-                output_filename = os.path.join(
-                    options.dir,
-                    FILE_TEMPLATE % {"prefix": options.prefix,
-                                     "filename": FILENAME_TYPES[image.type],
-                                     "filenum": i + 1,
-                                     "suffix": image.suffix()})
-                try:
-                    audiotools.make_dirs(output_filename)
-                    f = open(output_filename, "wb")
-                    f.write(image.data)
-                    f.close()
-                    msg.info(
-                        _(u"%(source)s -> %(destination)s") %
-                        {"source": msg.filename(audiofile.filename),
-                         "destination": msg.filename(output_filename)})
-                except IOError, e:
-                    msg.error(_(u"Unable to write \"%s\"") %
-                                  msg.filename(output_filename))
-                    sys.exit(1)
-                except OSError, e:
-                    msg.os_error(e)
-                    sys.exit(1)
+                output_images.append(
+                    (image,
+                     audiotools.Filename(
+                         os.path.join(
+                             options.dir,
+                             FILE_TEMPLATE % {
+                                 "prefix": options.prefix,
+                                 "filename": FILENAME_TYPES[image.type],
+                                 "filenum": i + 1,
+                                 "suffix": image.suffix()}))))
+
+        #ensure our input file isn't the same
+        #as any of the proposed files to extract
+        #(this sounds crazy,
+        # but there's no technical reason one's audio file
+        # can't be named "front_cover.jpg"
+        # even if it's not a JPEG
+        # so we have to be sure it's not going to be overwritten)
+        if (input_filename in
+            [output_filename for
+             (image, output_filename) in output_images]):
+            msg.error(_.ERR_OUTPUT_IS_INPUT % (input_filename,))
+            sys.exit(1)
+
+        #finally, write actual image data to disk if possible
+        for (image, output_filename) in output_images:
+            try:
+                audiotools.make_dirs(str(output_filename))
+                f = open(str(output_filename), "wb")
+                f.write(image.data)
+                f.close()
+                msg.info(_.LAB_ENCODE %
+                         {"source": input_filename,
+                          "destination": output_filename})
+            except IOError, e:
+                msg.error(_.ERR_ENCODING_ERROR % (output_filename,))
+                sys.exit(1)
+            except OSError, e:
+                msg.os_error(e)
+                sys.exit(1)

@@ -13,11 +13,13 @@ Contents:
 
    audiotools.rst
    audiotools_pcm.rst
-   audiotools_resample.rst
+   audiotools_bitstream.rst
+   audiotools_pcmconverter.rst
    audiotools_replaygain.rst
    audiotools_cdio.rst
    audiotools_cue.rst
    audiotools_toc.rst
+   audiotools_ui.rst
    audiotools_player.rst
    metadata.rst
 

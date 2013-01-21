@@ -14,15 +14,19 @@
   </description>
   <options>
     <option short="h" long="help">show a list of options and exit</option>
-    <option short="V" long="verbose" arg="verbosity">
-      The level of output to display.
-      Choose between 'normal', 'quiet' and 'debug.
+    <option short="I" long="interactive">
+      edit metadata and encoding options in interactive mode
+      prior to splitting file
     </option>
     <option short="c" long="cdrom" arg="cdrom">
       the CD-ROM device to extract audio from
     </option>
     <option short="s" long="speed" arg="speed">
       the speed to extract audio data at
+    </option>
+    <option short="V" long="verbose" arg="verbosity">
+      The level of output to display.
+      Choose between 'normal', 'quiet' and 'debug'.
     </option>
   </options>
   <options category="extraction">
@@ -47,13 +51,32 @@
       If this option is omitted, a default format string is used.
     </option>
   </options>
-  <options category="metadata">
-    <option short="x" long="xmcd" arg="filename">
-      A MusicBrainz XML file or FreeDB XMCD file to use for metadata for
-      the extracted tracks.
-      XML and XMCD files can be obtained from the
-      track2xmcd(1), cd2xmcd(1), dvda2xmcd(1), and editxmcd(1) programs.
+  <options category="CD lookup">
+    <option long="musicbrainz-server" arg="hostname">
+      the MusicBrainz server name to query for metadata
     </option>
+    <option long="musicbrainz-port" arg="port">
+      the MusicBrainz port to query for metadata
+    </option>
+    <option long="no-musicbrainz">
+      don't query MusicBrainz for metadata
+    </option>
+    <option long="freedb-server" arg="hostname">
+      the FreeDB server name to query for metadata
+    </option>
+    <option long="freedb-port" arg="port">
+      the FreeDB port to query for metadata
+    </option>
+    <option long="no-freedb">
+      don't query FreeDB for metadata
+    </option>
+    <option short="D" long="default">
+      When multiple metadata choices are available,
+      select the first one automatically.
+      This option has no effect when used with -I
+    </option>
+  </options>
+  <options category="metadata">
     <option long="album-number" arg="number">
       the album number of this CD, if it is one in a series of albums
     </option>
@@ -72,10 +95,10 @@
     <example>
       <description>
         Extract all of the tracks from \fI/dev/cdrom\fR as FLAC files
-        at the default quality using metadata from album.xmcd:
+        at the default quality:
       </description>
       <command>
-        cd2track -t flac -x album.xmcd -c /dev/cdrom
+        cd2track -t flac -c /dev/cdrom
       </command>
     </example>
   </examples>

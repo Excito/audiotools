@@ -7,7 +7,7 @@
 
 /********************************************************
  Audio Tools, a module and set of tools for manipulating audio data
- Copyright (C) 2007-2011  Brian Langenberger
+ Copyright (C) 2007-2012  Brian Langenberger
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -91,6 +91,7 @@ static int
 CDDA_init(cdio_CDDAObject *self, PyObject *args, PyObject *kwds)
 {
     const char *drive = NULL;
+    self->pcm_module = NULL;
 
     if (!PyArg_ParseTuple(args, "s", &drive))
         return -1;
@@ -121,26 +122,27 @@ CDDA_init(cdio_CDDAObject *self, PyObject *args, PyObject *kwds)
 static PyObject*
 CDDA_total_tracks(cdio_CDDAObject* self)
 {
-    track_t total;
+    track_t total = cdio_cddap_tracks(self->cdrom_drive);
 
-    total = cdio_cddap_tracks(self->cdrom_drive);
-
-    return Py_BuildValue("H", total);
+    return Py_BuildValue("i", (int)total);
 }
 
 static PyObject*
 CDDA_track_offsets(cdio_CDDAObject* self, PyObject *args)
 {
-    track_t tracknum;
+    int tracknum;
+    lsn_t first_sector;
+    lsn_t last_sector;
 
-    if (!PyArg_ParseTuple(args, "H", &tracknum))
+    if (!PyArg_ParseTuple(args, "i", &tracknum))
         return NULL;
 
-    return Py_BuildValue("(i,i)",
-                         cdio_cddap_track_firstsector(self->cdrom_drive,
-                                                      tracknum),
-                         cdio_cddap_track_lastsector(self->cdrom_drive,
-                                                     tracknum));
+    first_sector = cdio_cddap_track_firstsector(self->cdrom_drive,
+                                                (track_t)tracknum);
+    last_sector = cdio_cddap_track_lastsector(self->cdrom_drive,
+                                              (track_t)tracknum);
+
+    return Py_BuildValue("(i,i)", (int)first_sector, (int)last_sector);
 }
 
 #define SECTOR_LENGTH 2352
@@ -170,7 +172,7 @@ CDDA_read_sector(cdio_CDDAObject* self)
     sector->bits_per_sample = 16;
     sector->samples_length = (sector->frames * sector->channels);
     sector->samples = realloc(sector->samples,
-                              sector->samples_length * sizeof(ia_data_t));
+                              sector->samples_length * sizeof(int));
 
     raw_sector = cdio_paranoia_read_limited(self->paranoia,
                                             &read_sector_callback,
@@ -216,7 +218,7 @@ CDDA_read_sectors(cdio_CDDAObject* self, PyObject *args)
     sectors->bits_per_sample = 16;
     sectors->samples_length = (sectors->frames * sectors->channels);
     sectors->samples = realloc(sectors->samples,
-                               sectors->samples_length * sizeof(ia_data_t));
+                               sectors->samples_length * sizeof(int));
 
     for (sectors_read = 0; sectors_read < sectors_to_read; sectors_read++) {
         raw_sector = cdio_paranoia_read_limited(self->paranoia,
@@ -249,14 +251,14 @@ CDDA_last_sector(cdio_CDDAObject* self, PyObject *args)
 static PyObject*
 CDDA_track_type(cdio_CDDAObject* self, PyObject *args)
 {
-    track_t tracknum;
+    int tracknum;
 
-    if (!PyArg_ParseTuple(args, "H", &tracknum))
+    if (!PyArg_ParseTuple(args, "i", &tracknum))
         return NULL;
 
     return Py_BuildValue("i",
                          cdio_get_track_format(self->cdrom_drive->p_cdio,
-                                               tracknum));
+                                               (track_t)tracknum));
 }
 
 static PyObject*
@@ -269,8 +271,8 @@ CDDA_seek(cdio_CDDAObject* self, PyObject *args)
         return NULL;
 
     new_location = cdio_paranoia_seek(self->paranoia,
-                                      location,
-                                      SEEK_SET);
+                                      (int32_t)location,
+                                      (int)SEEK_SET);
 
     return Py_BuildValue("i", new_location);
 }
@@ -328,6 +330,8 @@ static int
 CDImage_init(cdio_CDImage *self, PyObject *args, PyObject *kwds) {
     const char *image = NULL;
     int image_type;
+    self->pcm_module = NULL;
+    self->image = NULL;
 
     if (!PyArg_ParseTuple(args, "si", &image, &image_type))
         return -1;
@@ -372,19 +376,25 @@ CDImage_dealloc(cdio_CDImage* self) {
 
 static PyObject*
 CDImage_total_tracks(cdio_CDImage* self) {
-    return Py_BuildValue("H", cdio_get_last_track_num(self->image));
+    track_t last_track = cdio_get_last_track_num(self->image);
+
+    return Py_BuildValue("i", (int)last_track);
 }
 
 static PyObject*
 CDImage_track_offsets(cdio_CDImage* self, PyObject *args) {
-    track_t tracknum;
+    /* track_t tracknum; */
+    int tracknum;
+    lsn_t first_sector;
+    lsn_t last_sector;
 
-    if (!PyArg_ParseTuple(args, "H", &tracknum))
+    if (!PyArg_ParseTuple(args, "i", &tracknum))
         return NULL;
 
-    return Py_BuildValue("(i,i)",
-                         cdio_get_track_lsn(self->image, tracknum),
-                         cdio_get_track_last_lsn(self->image, tracknum));
+    first_sector = cdio_get_track_lsn(self->image, (track_t)tracknum);
+    last_sector = cdio_get_track_last_lsn(self->image, (track_t)tracknum);
+
+    return Py_BuildValue("(i,i)", (int)first_sector, (int)last_sector);
 }
 
 static PyObject*
@@ -461,13 +471,14 @@ CDImage_last_sector(cdio_CDImage* self, PyObject *args) {
 
 static PyObject*
 CDImage_track_type(cdio_CDImage* self, PyObject *args) {
-    track_t tracknum;
+    int tracknum;
 
-    if (!PyArg_ParseTuple(args, "H", &tracknum))
+    if (!PyArg_ParseTuple(args, "i", &tracknum))
         return NULL;
 
         return Py_BuildValue("i",
-                             cdio_get_track_format(self->image, tracknum));
+                             cdio_get_track_format(self->image,
+                                                   (track_t)tracknum));
 }
 
 static PyObject*
@@ -572,4 +583,69 @@ cdio_identify_cdrom(PyObject *dummy, PyObject *args) {
         PyErr_SetString(PyExc_ValueError, "unknown device");
         return NULL;
     }
+}
+
+static PyObject*
+cdio_accuraterip_crc(PyObject *dummy, PyObject *args) {
+    uint32_t crc;
+    uint32_t track_index;
+    PyObject *pcm = NULL;
+    PyObject *framelist_class;
+    PyObject *framelist_obj;
+    pcm_FrameList *framelist;
+    unsigned i;
+    int left_v;
+    int right_v;
+    uint32_t left;
+    uint32_t right;
+
+    if (!PyArg_ParseTuple(args, "IIO", &crc, &track_index, &framelist_obj))
+        return NULL;
+
+    /*ensure framelist_obj is a FrameList*/
+    if ((pcm = PyImport_ImportModule("audiotools.pcm")) == NULL)
+        return NULL;
+
+    if ((framelist_class = PyObject_GetAttrString(pcm, "FrameList")) == NULL) {
+        Py_DECREF(pcm);
+        PyErr_SetString(PyExc_AttributeError, "FrameList class not found");
+        return NULL;
+    }
+
+    if (!PyObject_IsInstance(framelist_obj, framelist_class)) {
+        PyErr_SetString(PyExc_TypeError, "objects must be of type FrameList");
+        Py_DECREF(framelist_class);
+        Py_DECREF(pcm);
+        return NULL;
+    } else {
+        /*convert framelist_obj to FrameList struct*/
+        Py_DECREF(framelist_class);
+        Py_DECREF(pcm);
+        framelist = (pcm_FrameList*)framelist_obj;
+    }
+
+    /*check that FrameList is the appropriate type*/
+    if (framelist->channels != 2) {
+        PyErr_SetString(PyExc_ValueError,
+                        "FrameList must be 2 channels");
+        return NULL;
+    }
+    if (framelist->bits_per_sample != 16) {
+        PyErr_SetString(PyExc_ValueError,
+                        "FrameList must be 16 bits per sample");
+        return NULL;
+    }
+
+    /*update CRC with values from FrameList struct*/
+    for (i = 0; i < framelist->frames; i++) {
+        left_v = framelist->samples[i * 2];
+        right_v = framelist->samples[i * 2 + 1];
+        left = left_v >= 0 ? left_v : (1 << 16) - (-left_v);
+        right = right_v >= 0 ? right_v : (1 << 16) - (-right_v);
+        crc += ((left | (right << 16)) * track_index);
+        track_index++;
+    }
+
+    /*return new CRC*/
+    return Py_BuildValue("(II)", crc, track_index);
 }

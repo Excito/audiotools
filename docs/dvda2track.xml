@@ -10,13 +10,13 @@
     dvda2track extracts audio files from a DVD-Audio disc and
     encodes them to tracks.
     If track numbers are given, extracts only those tracks.
-    Otherwise, extracts the entire disc.
+    Otherwise, extracts the entire title.
   </description>
   <options>
     <option short="h" long="help">show a list of options and exit</option>
-    <option short="V" long="verbose" arg="verbosity">
-      The level of output to display.
-      Choose between 'normal', 'quiet' and 'debug.
+    <option short="I" long="interactive">
+      edit metadata and encoding options in interactive mode
+      prior to extracting files
     </option>
     <option short="c" long="cdrom" arg="cdrom">
       the DVD-ROM device to extract audio from
@@ -27,6 +27,10 @@
     <option long="title" arg="number">
       the title number to retrieve tracks from, starting from 1;
       the number of titles can be determined from the dvdainfo(1) utility
+    </option>
+    <option short="V" long="verbose" arg="verbosity">
+      The level of output to display.
+      Choose between 'normal', 'quiet' and 'debug'.
     </option>
   </options>
   <options category="extraction">
@@ -51,13 +55,32 @@
       If this option is omitted, a default format string is used.
     </option>
   </options>
-  <options category="metadata">
-    <option short="x" long="xmcd" arg="filename">
-      A MusicBrainz XML file or FreeDB XMCD file to use for metadata for
-      the extracted tracks.
-      XML and XMCD files can be obtained from the
-      track2xmcd(1), cd2xmcd(1), dvda2xmcd(1), and editxmcd(1) programs.
+  <options category="metadata lookup">
+    <option long="musicbrainz-server" arg="hostname">
+      the MusicBrainz server name to query for metadata
     </option>
+    <option long="musicbrainz-port" arg="port">
+      the MusicBrainz port to query for metadata
+    </option>
+    <option long="no-musicbrainz">
+      don't query MusicBrainz for metadata
+    </option>
+    <option long="freedb-server" arg="hostname">
+      the FreeDB server name to query for metadata
+    </option>
+    <option long="freedb-port" arg="port">
+      the FreeDB port to query for metadata
+    </option>
+    <option long="no-freedb">
+      don't query FreeDB for metadata
+    </option>
+    <option short="D" long="default">
+      When multiple metadata choices are available,
+      select the first one automatically.
+      This option has no effect when used with -I
+    </option>
+  </options>
+  <options category="metadata">
     <option long="track-start" arg="number">
       the starting track number of the title being extracted
     </option>
@@ -79,30 +102,14 @@
       do not add ReplayGain metadata to newly created tracks
     </option>
   </options>
-  <element name="about DVD access">
-    <p>
-      Some systems will spin-down a DVD if it has not been accessed
-      for awhile, but will fail to bring it back up again if reads
-      are requested.
-      For example, one might use dvda2xmcd(1) to get a disc's
-      metadata, then edit it with editxmcd(1).
-      But while editing, the system spins down the DVD drive
-      and subsequent calls to dvda2track(1) fail.
-    </p>
-    <p>
-      In this instance, one might have to reinsert the disc
-      for it to be read properly.
-    </p>
-  </element>
   <examples>
     <example>
       <description>
         Extract all the tracks in title 1 from /dev/cdrom
-        which is mounted at /media/cdrom/AUDIO_TS as FLAC files
-        using metadata from album.xmcd
+        which is mounted at /media/cdrom/AUDIO_TS as FLAC files:
       </description>
       <command>
-        dvda2track -t flac -x album.xmcd -c /dev/cdrom -A /media/cdrom/AUDIO_TS
+        dvda2track -t flac -c /dev/cdrom -A /media/cdrom/AUDIO_TS
       </command>
     </example>
     <example>

@@ -1,20 +1,18 @@
+PYTHON = python
 MAN_PATH = /usr/share/man
 MAN_PAGES = \
 audiotools-config.1 \
 audiotools.cfg.5 \
 cd2track.1 \
-cd2xmcd.1 \
 cdinfo.1 \
 cdplay.1 \
 coverdump.1 \
+covertag.1 \
 coverview.1 \
 dvda2track.1 \
-dvda2xmcd.1 \
 dvdainfo.1 \
-editxmcd.1 \
 track2cd.1 \
 track2track.1 \
-track2xmcd.1 \
 trackcat.1 \
 trackcmp.1 \
 trackinfo.1 \
@@ -30,18 +28,15 @@ MAN_SOURCES = \
 audiotools-config.xml \
 audiotools.cfg.xml \
 cd2track.xml \
-cd2xmcd.xml \
 cdinfo.xml \
 cdplay.xml \
 coverdump.xml \
+covertag.xml \
 coverview.xml \
 dvda2track.xml \
-dvda2xmcd.xml \
 dvdainfo.xml \
-editxmcd.xml \
 track2cd.xml \
 track2track.xml \
-track2xmcd.xml \
 trackcat.xml \
 trackcmp.xml \
 trackinfo.xml \
@@ -56,11 +51,10 @@ trackverify.xml
 .SUFFIXES: .xml .1 .5
 
 .xml.1:
-	python manpagexml.py -i $< $(MAN_SOURCES) > $@
+	$(PYTHON) manpagexml.py -i $< $(MAN_SOURCES) > $@
 
 .xml.5:
-	python manpagexml.py -i $< $(MAN_SOURCES) > $@
-
+	$(PYTHON) manpagexml.py -i $< $(MAN_SOURCES) > $@
 
 TARGETS = audioformats-letter.pdf audioformats-a4.pdf \
 audiotools-letter.pdf audiotools-a4.pdf \

@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 #Audio Tools, a module and set of tools for manipulating audio data
-#Copyright (C) 2007-2011  Brian Langenberger
+#Copyright (C) 2007-2012  Brian Langenberger
 
 #This program is free software; you can redistribute it and/or modify
 #it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@
 
 import unittest
 import audiotools
-from audiotools import Con
+import struct
 import random
 import tempfile
 import decimal
@@ -33,11 +33,13 @@ from test import (parser, Variable_Reader, BLANK_PCM_Reader,
                   RANDOM_PCM_Reader,
                   EXACT_BLANK_PCM_Reader, SHORT_PCM_COMBINATIONS,
                   MD5_Reader, FrameCounter,
-                  MiniFrameReader, Combinations,
+                  MiniFrameReader, Combinations, Possibilities,
                   TEST_COVER1, TEST_COVER2, TEST_COVER3, HUGE_BMP)
+
 
 def do_nothing(self):
     pass
+
 
 #add a bunch of decorator metafunctions like LIB_CORE
 #which can be wrapped around individual tests as needed
@@ -51,14 +53,160 @@ for section in parser.sections():
                               option.upper())] = lambda function: do_nothing
 
 
-class BufferedPCMReader(unittest.TestCase):
-    @LIB_CORE
+class PCMReader(unittest.TestCase):
+    @LIB_PCM
     def test_pcm(self):
-        def frame_lengths(reader, bytes):
-            frame = reader.read(bytes)
+        from audiotools.pcm import from_list
+
+        #try reading lots of bps/signed/endianness combinations
+        for bps in [8, 16, 24]:
+            for big_endian in [True, False]:
+                for signed in [True, False]:
+                    reader = audiotools.PCMReader(
+                        cStringIO.StringIO(
+                            from_list(range(-5, 5),
+                                      1,
+                                      bps,
+                                      True).to_bytes(big_endian, signed)),
+                        sample_rate=44100,
+                        channels=1,
+                        channel_mask=0x4,
+                        bits_per_sample=bps,
+                        signed=signed,
+                        big_endian=big_endian)
+
+                    self.assertEqual(reader.sample_rate, 44100)
+                    self.assertEqual(reader.channels, 1)
+                    self.assertEqual(reader.channel_mask, 0x4)
+                    self.assertEqual(reader.bits_per_sample, bps)
+
+                    #ensure the FrameList is read correctly
+                    f = reader.read((bps / 8) * 10)
+                    self.assertEqual(len(f), 10)
+                    self.assertEqual(list(f), range(-5, 5))
+
+                    #ensure subsequent reads return empty FrameLists
+                    for i in xrange(10):
+                        f = reader.read((bps / 8) * 10)
+                        self.assertEqual(len(f), 0)
+
+                    #ensure closing the stream raises ValueErrors
+                    #on subsequent reads
+                    reader.close()
+
+                    self.assertRaises(ValueError, reader.read, (bps / 8) * 10)
+
+
+class PCMCat(unittest.TestCase):
+    @LIB_PCM
+    def test_pcm(self):
+        from audiotools.pcm import from_list
+
+        #ensure mismatched streams raise ValueError at init time
+        audiotools.PCMCat([audiotools.PCMReader(cStringIO.StringIO(""),
+                                                sample_rate=44100,
+                                                channels=1,
+                                                channel_mask=0x4,
+                                                bits_per_sample=16)])
+
+        self.assertRaises(ValueError,
+                          audiotools.PCMCat,
+                          [audiotools.PCMReader(cStringIO.StringIO(""),
+                                                sample_rate=96000,
+                                                channels=1,
+                                                channel_mask=0x4,
+                                                bits_per_sample=16),
+                           audiotools.PCMReader(cStringIO.StringIO(""),
+                                                sample_rate=44100,
+                                                channels=1,
+                                                channel_mask=0x4,
+                                                bits_per_sample=16)])
+
+        self.assertRaises(ValueError,
+                          audiotools.PCMCat,
+                          [audiotools.PCMReader(cStringIO.StringIO(""),
+                                                sample_rate=44100,
+                                                channels=2,
+                                                channel_mask=0x3,
+                                                bits_per_sample=16),
+                           audiotools.PCMReader(cStringIO.StringIO(""),
+                                                sample_rate=44100,
+                                                channels=1,
+                                                channel_mask=0x4,
+                                                bits_per_sample=16)])
+
+        self.assertRaises(ValueError,
+                          audiotools.PCMCat,
+                          [audiotools.PCMReader(cStringIO.StringIO(""),
+                                                sample_rate=44100,
+                                                channels=1,
+                                                channel_mask=0x4,
+                                                bits_per_sample=24),
+                           audiotools.PCMReader(cStringIO.StringIO(""),
+                                                sample_rate=44100,
+                                                channels=1,
+                                                channel_mask=0x4,
+                                                bits_per_sample=16)])
+
+        main_readers = [audiotools.PCMReader(
+                cStringIO.StringIO(
+                    from_list(samples, 1, 16, True).to_bytes(True,
+                                                             True)),
+                sample_rate=44100,
+                channels=1,
+                channel_mask=0x4,
+                bits_per_sample=16,
+                signed=True,
+                big_endian=True)
+                        for samples in [range(-15, -5),
+                                        range(-5, 5),
+                                        range(5, 15)]]
+
+        reader = audiotools.PCMCat(main_readers)
+
+        #ensure PCMCat's stream attributes match first reader's
+        self.assertEqual(reader.sample_rate, 44100)
+        self.assertEqual(reader.channels, 1)
+        self.assertEqual(reader.channel_mask, 0x4)
+        self.assertEqual(reader.bits_per_sample, 16)
+
+        #ensure all the substreams are read correctly
+        samples = []
+        f = reader.read(2)
+        while (len(f) > 0):
+            samples.extend(list(f))
+            f = reader.read(2)
+
+        self.assertEqual(samples, range(-15, 15))
+
+        #ensure subsequent reads return empty FrameLists
+        for i in xrange(10):
+            self.assertEqual(len(reader.read(2)), 0)
+
+        #main readers should not yet be closed
+        for r in main_readers:
+            for i in xrange(10):
+                self.assertEqual(len(r.read(2)), 0)
+
+        #ensure closing the stream raises ValueErrors
+        #on subsequent reads
+        reader.close()
+
+        self.assertRaises(ValueError, reader.read, 2)
+
+        #sub readers should also be closed by PCMCat's close()
+        for r in main_readers:
+            self.assertRaises(ValueError, r.read, 2)
+
+
+class BufferedPCMReader(unittest.TestCase):
+    @LIB_PCM
+    def test_pcm(self):
+        def frame_lengths(reader, pcm_frames):
+            frame = reader.read(pcm_frames)
             while (len(frame) > 0):
                 yield frame.frames
-                frame = reader.read(bytes)
+                frame = reader.read(pcm_frames)
             else:
                 reader.close()
 
@@ -71,7 +219,7 @@ class BufferedPCMReader(unittest.TestCase):
         reader = audiotools.BufferedPCMReader(
             Variable_Reader(EXACT_BLANK_PCM_Reader(4096 * 100)))
         #(make sure to account for bps/channels in frame_lengths())
-        self.assertEqual(set(frame_lengths(reader, 4096 * 4)), set([4096]))
+        self.assertEqual(set(frame_lengths(reader, 4096)), set([4096]))
 
         #check that sample_rate, bits_per_sample, channel_mask and channels
         #pass-through properly
@@ -97,16 +245,218 @@ class BufferedPCMReader(unittest.TestCase):
                     self.assertEqual(reader2.bits_per_sample, bits_per_sample)
                     self.assertEqual(reader2.channel_mask, channel_mask)
 
-
-        #finally, ensure that random-sized reads also work okay
+        #ensure that random-sized reads also work okay
         total_frames = 4096 * 1000
         reader = audiotools.BufferedPCMReader(
             Variable_Reader(EXACT_BLANK_PCM_Reader(total_frames)))
         while (total_frames > 0):
             frames = min(total_frames, random.choice(range(1, 1000)))
-            frame = reader.read(frames * 4)
+            frame = reader.read(frames)
             self.assertEqual(frame.frames, frames)
             total_frames -= frame.frames
+
+        #ensure reading after the stream has been exhausted
+        #results in empty FrameLists
+        reader = audiotools.BufferedPCMReader(
+            EXACT_BLANK_PCM_Reader(44100))
+        f = reader.read(4096)
+        while (len(f) > 0):
+            f = reader.read(4096)
+
+        self.assertEqual(len(f), 0)
+
+        for i in xrange(10):
+            f = reader.read(4096)
+            self.assertEqual(len(f), 0)
+
+        #and ensure reading after the stream is closed
+        #raises a ValueError
+        reader.close()
+
+        self.assertRaises(ValueError,
+                          reader.read,
+                          4096)
+
+
+class LimitedPCMReader(unittest.TestCase):
+    @LIB_PCM
+    def test_pcm(self):
+        from audiotools.pcm import from_list
+
+        main_reader = audiotools.PCMReader(
+            cStringIO.StringIO(
+                from_list(range(-50, 50), 1, 16, True).to_bytes(True, True)),
+            sample_rate=44100,
+            channels=1,
+            channel_mask=0x4,
+            bits_per_sample=16,
+            signed=True,
+            big_endian=True)
+
+        total_samples = []
+        for pcm_frames in [10, 20, 30, 40]:
+            reader_samples = []
+            reader = audiotools.LimitedPCMReader(main_reader, pcm_frames)
+            self.assertEqual(reader.sample_rate, 44100)
+            self.assertEqual(reader.channels, 1)
+            self.assertEqual(reader.channel_mask, 0x4)
+            self.assertEqual(reader.bits_per_sample, 16)
+
+            f = reader.read(2)
+            while (len(f) > 0):
+                reader_samples.extend(list(f))
+                f = reader.read(2)
+
+            self.assertEqual(len(reader_samples), pcm_frames)
+
+            total_samples.extend(reader_samples)
+
+            #ensure subsequent reads return empty FrameLists
+            for i in xrange(10):
+                self.assertEqual(len(reader.read(2)), 0)
+
+            #ensure closing the substream raises ValueErrors
+            #on subsequent reads
+            #(note that this doesn't close the main reader)
+            reader.close()
+
+            self.assertRaises(ValueError, reader.read, 2)
+
+        self.assertEqual(total_samples, range(-50, 50))
+
+        #ensure subsequent reads of main reader return empty FrameLists
+        for i in xrange(10):
+            self.assertEqual(len(main_reader.read(2)), 0)
+
+        #ensure closing the substream raises ValueErrors
+        #on subsequent reads
+        main_reader.close()
+
+        self.assertRaises(ValueError, main_reader.read, 2)
+
+
+class PCMReaderWindow(unittest.TestCase):
+    @LIB_PCM
+    def test_pcm(self):
+        from audiotools.pcm import from_list
+
+        for initial_offset in range(-5, 5):
+            for pcm_frames in range(5, 15):
+                main_reader = audiotools.PCMReader(
+                    cStringIO.StringIO(
+                        from_list(range(1, 11),
+                                  1,
+                                  16,
+                                  True).to_bytes(True, True)),
+                    sample_rate=44100,
+                    channels=1,
+                    channel_mask=0x4,
+                    bits_per_sample=16,
+                    signed=True,
+                    big_endian=True)
+
+                reader = audiotools.PCMReaderWindow(main_reader,
+                                                    initial_offset,
+                                                    pcm_frames)
+
+                self.assertEqual(reader.sample_rate,
+                                 main_reader.sample_rate)
+                self.assertEqual(reader.channels,
+                                 main_reader.channels)
+                self.assertEqual(reader.channel_mask,
+                                 main_reader.channel_mask)
+                self.assertEqual(reader.bits_per_sample,
+                                 main_reader.bits_per_sample)
+
+                #ensure reads generate the proper window of samples
+                samples = []
+                f = reader.read(2)
+                while (len(f) > 0):
+                    samples.extend(list(f))
+                    f = reader.read(2)
+
+                self.assertEqual(len(samples), pcm_frames)
+
+                target_samples = range(1, 11)
+                if (initial_offset < 0):
+                    #negative offsets pad window with 0s
+                    target_samples = (([0] * abs(initial_offset)) +
+                                      target_samples)
+                elif (initial_offset > 0):
+                    #positive offsets remove samples from window
+                    target_samples = target_samples[initial_offset:]
+
+                if (len(target_samples) < pcm_frames):
+                    #window longer than samples gets padded with 0s
+                    target_samples += [0] * (pcm_frames - len(target_samples))
+                elif (len(target_samples) > pcm_frames):
+                    #window shorder than samples truncates samples
+                    target_samples = target_samples[0:pcm_frames]
+
+                self.assertEqual(samples, target_samples)
+
+                #ensure subsequent reads return empty FrameLists
+                for i in xrange(10):
+                    self.assertEqual(len(reader.read(2)), 0)
+
+                #ensure closing the PCMReaderWindow
+                #generates ValueErrors on subsequent reads
+                reader.close()
+
+                self.assertRaises(ValueError, reader.read, 2)
+
+                #ensure closing the PCMReaderWindow
+                #closes the main PCMReader also
+                self.assertRaises(ValueError, main_reader.read, 2)
+
+
+class Sines(unittest.TestCase):
+    @LIB_PCM
+    def test_pcm(self):
+        for stream in [
+            test_streams.Generate01(44100),
+            test_streams.Generate02(44100),
+            test_streams.Generate03(44100),
+            test_streams.Generate04(44100),
+
+            test_streams.Sine8_Mono(200000, 48000,
+                                    441.0, 0.50, 441.0, 0.49),
+            test_streams.Sine8_Stereo(200000, 48000,
+                                      441.0, 0.50, 441.0, 0.49, 1.0),
+            test_streams.Sine16_Mono(200000, 48000,
+                                     441.0, 0.50, 441.0, 0.49),
+            test_streams.Sine16_Stereo(200000, 48000,
+                                       441.0, 0.50, 441.0, 0.49, 1.0),
+            test_streams.Sine24_Mono(200000, 48000,
+                                     441.0, 0.50, 441.0, 0.49),
+            test_streams.Sine24_Stereo(200000, 48000,
+                                       441.0, 0.50, 441.0, 0.49, 1.0),
+            test_streams.Simple_Sine(200000, 44100, 0x3F, 16,
+                                     (6400, 10000),
+                                     (11520, 15000),
+                                     (16640, 20000),
+                                     (21760, 25000),
+                                     (26880, 30000),
+                                     (30720, 35000)),
+
+            test_streams.fsd16([1, -1], 100),
+
+            test_streams.WastedBPS16(1000)]:
+
+            #read the base data from the stream
+            f = stream.read(4096)
+            while (len(f) > 0):
+                f = stream.read(4096)
+
+            #ensure subsequent reads return empty FrameLists
+            for i in xrange(10):
+                self.assertEqual(len(stream.read(4096)), 0)
+
+            #ensure subsequent reads on a closed stream
+            #raises ValueError
+            stream.close()
+
+            self.assertRaises(ValueError, stream.read, 4096)
 
 
 class CDDA(unittest.TestCase):
@@ -117,13 +467,10 @@ class CDDA(unittest.TestCase):
         self.cue = os.path.join(self.temp_dir, "Test.CUE")
 
         bin_file = open(self.bin, "wb")
-        # self.reader = MD5_Reader(EXACT_BLANK_PCM_Reader(69470436))
         self.reader = test_streams.Sine16_Stereo(69470436, 44100,
                                                  441.0, 0.50,
                                                  4410.0, 0.49, 1.0)
-        audiotools.transfer_framelist_data(
-
-            self.reader, bin_file.write)
+        audiotools.transfer_framelist_data(self.reader, bin_file.write)
         bin_file.close()
 
         f = open(self.cue, "w")
@@ -149,18 +496,54 @@ Fy3hYEs4qiXB6wOQULBQkOhCygalbISUUvrnACQVERfIr1scI4K5lk9od5+/""".decode('base64')
                                       self.sample_offset)
 
     @LIB_CORE
+    def test_init(self):
+        from audiotools.cdio import CDDA
+        from audiotools.cdio import CDImage
+
+        self.assertRaises(TypeError, CDDA)
+        self.assertRaises(TypeError, CDDA, None)
+        self.assertRaises(TypeError, CDImage)
+        self.assertRaises(ValueError, CDImage, "", -1)
+
+    @LIB_CORE
     def test_cdda(self):
         cdda = audiotools.CDDA(self.cue)
         self.assertEqual(len(cdda), 4)
         checksum = md5()
-        audiotools.transfer_framelist_data(
-            audiotools.PCMCat(iter(cdda)),
-            checksum.update)
+        audiotools.transfer_framelist_data(audiotools.PCMCat(iter(cdda)),
+                                           checksum.update)
         self.assertEqual(self.reader.hexdigest(),
                          checksum.hexdigest())
 
     @LIB_CORE
+    def test_cdda_pcm(self):
+        cdda = audiotools.CDDA(self.cue)
+
+        for track in cdda:
+            #ensure all track data reads correctly
+            track_frames = track.length() * 588
+            total_frames = 0
+            f = track.read(4096)
+            while (len(f) > 0):
+                total_frames += f.frames
+                f = track.read(4096)
+            self.assertEqual(total_frames, track_frames)
+
+            #ensure further reads return empty FrameLists
+            for i in xrange(10):
+                self.assertEqual(len(track.read(4096)), 0)
+
+            #ensure closing the reader raises ValueErrors
+            #on subsequent reads
+            track.close()
+
+            self.assertRaises(ValueError, track.read, 4096)
+
+    @LIB_CORE
     def test_cdda_positive_offset(self):
+        #offset values don't apply to CD images
+        #so this test doesn't do much
+
         audiotools.config.set_default("System",
                                       "cdrom_read_offset",
                                       str(10))
@@ -173,7 +556,7 @@ Fy3hYEs4qiXB6wOQULBQkOhCygalbISUUvrnACQVERfIr1scI4K5lk9od5+/""".decode('base64')
         self.reader.reset()
         audiotools.transfer_framelist_data(
             audiotools.PCMReaderWindow(self.reader,
-                                       10,
+                                       0,
                                        69470436),
             reader_checksum.update)
         self.assertEqual(reader_checksum.hexdigest(),
@@ -181,6 +564,9 @@ Fy3hYEs4qiXB6wOQULBQkOhCygalbISUUvrnACQVERfIr1scI4K5lk9od5+/""".decode('base64')
 
     @LIB_CORE
     def test_cdda_negative_offset(self):
+        #offset values don't apply to CD images
+        #so this test doesn't do much
+
         audiotools.config.set_default("System",
                                       "cdrom_read_offset",
                                       str(-10))
@@ -193,7 +579,7 @@ Fy3hYEs4qiXB6wOQULBQkOhCygalbISUUvrnACQVERfIr1scI4K5lk9od5+/""".decode('base64')
         self.reader.reset()
         audiotools.transfer_framelist_data(
             audiotools.PCMReaderWindow(self.reader,
-                                       -10,
+                                       0,
                                        69470436),
             reader_checksum.update)
         self.assertEqual(reader_checksum.hexdigest(),
@@ -224,6 +610,54 @@ class ChannelMask(unittest.TestCase):
                 mask2 = audiotools.ChannelMask(int(mask))
                 self.assertEqual(mask, mask2)
 
+
+class Filename(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.temp_file1 = os.path.join(self.temp_dir, "file1")
+        self.temp_file2 = os.path.join(self.temp_dir, "file2")
+        f = open(self.temp_file1, "w")
+        f.write("hello world")
+        f.close()
+        os.link(self.temp_file1, self.temp_file2)
+
+    def tearDown(self):
+        os.unlink(self.temp_file1)
+        os.unlink(self.temp_file2)
+        os.rmdir(self.temp_dir)
+
+    @LIB_CORE
+    def test_filename(self):
+        file1 = audiotools.Filename(self.temp_file1)
+        file2 = audiotools.Filename(self.temp_file2)
+        file3 = audiotools.Filename(os.path.join(self.temp_dir, "file3"))
+        file4 = audiotools.Filename(os.path.join(self.temp_dir, "./file3"))
+        file5 = audiotools.Filename(os.path.join(self.temp_dir, "file4"))
+
+        self.assert_(file1.disk_file())
+        self.assert_(file2.disk_file())
+        self.assertNotEqual(str(file1), str(file2))
+        self.assertNotEqual(unicode(file1), unicode(file2))
+        self.assertEqual(file1, file2)
+        self.assertEqual(hash(file1), hash(file2))
+
+        self.assert_(not file3.disk_file())
+        self.assertNotEqual(str(file1), str(file3))
+        self.assertNotEqual(unicode(file1), unicode(file3))
+        self.assertNotEqual(file1, file3)
+        self.assertNotEqual(hash(file1), hash(file3))
+
+        self.assert_(not file4.disk_file())
+        self.assertEqual(str(file3), str(file4))
+        self.assertEqual(unicode(file3), unicode(file4))
+        self.assertEqual(file3, file4)
+        self.assertEqual(hash(file3), hash(file4))
+
+        self.assert_(not file5.disk_file())
+        self.assertNotEqual(str(file3), str(file5))
+        self.assertNotEqual(unicode(file3), unicode(file5))
+        self.assertNotEqual(file3, file5)
+        self.assertNotEqual(hash(file3), hash(file5))
 
 class ImageJPEG(unittest.TestCase):
     @LIB_CORE
@@ -402,15 +836,15 @@ class ImageHugeBMP(ImageJPEG):
 
 
 class PCMConverter(unittest.TestCase):
-    @LIB_CORE
+    @LIB_PCM
     def setUp(self):
         self.tempwav = tempfile.NamedTemporaryFile(suffix=".wav")
 
-    @LIB_CORE
+    @LIB_PCM
     def tearDown(self):
         self.tempwav.close()
 
-    @LIB_CORE
+    @LIB_PCM
     def test_conversions(self):
         for ((i_sample_rate,
               i_channels,
@@ -436,11 +870,13 @@ class PCMConverter(unittest.TestCase):
                                       bits_per_sample=i_bits_per_sample,
                                       channel_mask=i_channel_mask)
 
-            converter = audiotools.PCMConverter(reader,
-                                                sample_rate=o_sample_rate,
-                                                channels=o_channels,
-                                                bits_per_sample=o_bits_per_sample,
-                                                channel_mask=o_channel_mask)
+            converter = audiotools.PCMConverter(
+                reader,
+                sample_rate=o_sample_rate,
+                channels=o_channels,
+                bits_per_sample=o_bits_per_sample,
+                channel_mask=o_channel_mask)
+
             wave = audiotools.WaveAudio.from_pcm(self.tempwav.name, converter)
             converter.close()
 
@@ -452,102 +888,58 @@ class PCMConverter(unittest.TestCase):
                 (decimal.Decimal(wave.cd_frames()) / 75).to_integral(),
                 5)
 
+    @LIB_PCM
+    def test_pcm(self):
+        for (in_sample_rate,
+             (in_channels,
+              in_channel_mask),
+             in_bits_per_sample) in Possibilities([44100, 96000],
+                                                  [(1, 0x4),
+                                                   (2, 0x3),
+                                                   (4, 0x33)],
+                                                  [16, 24]):
+            for (out_sample_rate,
+                 (out_channels,
+                  out_channel_mask),
+                 out_bits_per_sample) in Possibilities([44100, 96000],
+                                                       [(1, 0x4),
+                                                        (2, 0x3),
+                                                        (4, 0x33)],
+                                                       [16, 24]):
 
-class LimitedPCMReader(unittest.TestCase):
-    @LIB_CORE
-    def test_read(self):
-        reader = audiotools.BufferedPCMReader(BLANK_PCM_Reader(1))
-        counter1 = FrameCounter(2, 16, 44100)
-        counter2 = FrameCounter(2, 16, 44100)
-        audiotools.transfer_framelist_data(
-            audiotools.LimitedPCMReader(reader, 4100), counter1.update)
-        audiotools.transfer_framelist_data(
-            audiotools.LimitedPCMReader(reader, 40000), counter2.update)
-        self.assertEqual(counter1.value, 4100 * 4)
-        self.assertEqual(counter2.value, 40000 * 4)
+                main_reader = BLANK_PCM_Reader(
+                    length=1,
+                    sample_rate=in_sample_rate,
+                    channels=in_channels,
+                    bits_per_sample=in_bits_per_sample,
+                    channel_mask=in_channel_mask)
 
+                reader = audiotools.PCMConverter(
+                    pcmreader=main_reader,
+                    sample_rate=out_sample_rate,
+                    channels=out_channels,
+                    channel_mask=out_channel_mask,
+                    bits_per_sample=out_bits_per_sample)
 
-class PCMCat(unittest.TestCase):
-    @LIB_CUSTOM
-    def test_read(self):
-        reader1 = BLANK_PCM_Reader(1)
-        reader2 = BLANK_PCM_Reader(2)
-        reader3 = BLANK_PCM_Reader(3)
-        counter = FrameCounter(2, 16, 44100)
-        cat = audiotools.PCMCat(iter([reader1, reader2, reader3]))
-        self.assertEqual(cat.sample_rate, 44100)
-        self.assertEqual(cat.bits_per_sample, 16)
-        self.assertEqual(cat.channels, 2)
-        self.assertEqual(cat.channel_mask, 0x3)
-        audiotools.transfer_framelist_data(cat, counter.update)
-        self.assertEqual(int(counter), 6)
+                #read contents of converted stream
+                f = reader.read(4096)
+                while (len(f) > 0):
+                    f = reader.read(4096)
 
+                #ensure subsequent reads return empty FrameLists
+                for i in xrange(10):
+                    self.assertEqual(len(reader.read(4096)), 0)
 
-class PCMReaderWindow(unittest.TestCase):
-    @LIB_CORE
-    def setUp(self):
-        self.channels = [range(0, 20),
-                         range(20, 0, -1)]
+                #ensure closing stream raises ValueErrors
+                #on subsequent reads
+                reader.close()
 
-    def __test_reader__(self, pcmreader, channels):
-        framelist = pcmreader.read(1024)
-        output_channels = [[] for i in xrange(len(channels))]
-        while (len(framelist) > 0):
-            for c in xrange(framelist.channels):
-                output_channels[c].extend(framelist.channel(c))
-            framelist = pcmreader.read(1024)
-        self.assertEqual(channels, output_channels)
+                self.assertRaises(ValueError, reader.read, 4096)
 
-    @LIB_CORE
-    def test_basic(self):
-        self.__test_reader__(MiniFrameReader(self.channels,
-                                             44100, 3, 16),
-                             [range(0, 20), range(20, 0, -1)])
+                #ensure main reader is also closed
+                #when converter is closed
+                self.assertRaises(ValueError, main_reader.read, 4096)
 
-        self.__test_reader__(audiotools.PCMReaderWindow(
-                MiniFrameReader(self.channels, 44100, 3, 16), 0, 20),
-                             [range(0, 20), range(20, 0, -1)])
-
-    @LIB_CORE
-    def test_crop(self):
-        self.__test_reader__(audiotools.PCMReaderWindow(
-                MiniFrameReader(self.channels, 44100, 3, 16), 0, 15),
-                             [range(0, 15), range(20, 5, -1)])
-
-        self.__test_reader__(audiotools.PCMReaderWindow(
-                MiniFrameReader(self.channels, 44100, 3, 16), 5, 15),
-                             [range(5, 20), range(15, 0, -1)])
-
-        self.__test_reader__(audiotools.PCMReaderWindow(
-                MiniFrameReader(self.channels, 44100, 3, 16), 5, 10),
-                             [range(5, 15), range(15, 5, -1)])
-
-    @LIB_CORE
-    def test_extend(self):
-        self.__test_reader__(audiotools.PCMReaderWindow(
-                MiniFrameReader(self.channels, 44100, 3, 16), -5, 25),
-                             [[0] * 5 + range(0, 20),
-                              [0] * 5 + range(20, 0, -1)])
-
-        self.__test_reader__(audiotools.PCMReaderWindow(
-                MiniFrameReader(self.channels, 44100, 3, 16), 0, 25),
-                             [range(0, 20) + [0] * 5,
-                              range(20, 0, -1) + [0] * 5])
-
-        self.__test_reader__(audiotools.PCMReaderWindow(
-                MiniFrameReader(self.channels, 44100, 3, 16), -5, 20),
-                             [[0] * 5 + range(0, 15),
-                              [0] * 5 + range(20, 5, -1)])
-
-        self.__test_reader__(audiotools.PCMReaderWindow(
-                MiniFrameReader(self.channels, 44100, 3, 16), -5, 15),
-                             [[0] * 5 + range(0, 10),
-                              [0] * 5 + range(20, 10, -1)])
-
-        self.__test_reader__(audiotools.PCMReaderWindow(
-                MiniFrameReader(self.channels, 44100, 3, 16), -5, 30),
-                             [[0] * 5 + range(0, 20) + [0] * 5,
-                              [0] * 5 + range(20, 0, -1) + [0] * 5])
 
 class Test_ReplayGain(unittest.TestCase):
     @LIB_CORE
@@ -646,7 +1038,6 @@ class Test_group_tracks(unittest.TestCase):
                 album_number=1,
                 track_number=1))
 
-
     @LIB_CORE
     def tearDown(self):
         for track in self.track_files:
@@ -655,8 +1046,8 @@ class Test_group_tracks(unittest.TestCase):
     @LIB_CORE
     def test_grouping(self):
         groupings = list(audiotools.group_tracks(self.tracks))
-        groupings.sort(lambda x,y: cmp(x[0].get_metadata().album_name,
-                                       y[0].get_metadata().album_name))
+        groupings.sort(lambda x, y: cmp(x[0].get_metadata().album_name,
+                                        y[0].get_metadata().album_name))
         self.assertEqual(groupings[0], [self.tracks[0], self.tracks[2]])
         self.assertEqual(groupings[1], [self.tracks[1]])
         self.assertEqual(groupings[2], [self.tracks[3]])
@@ -675,8 +1066,7 @@ class Test_open(unittest.TestCase):
         self.dummy2.flush()
 
         data = open("flac-allframes.flac", "rb").read()
-        self.dummy3.write(data[0:0x6 + 1] + chr(0x21) +
-                          data[0x8:0x34 + 1] + data[0x36:])
+        self.dummy3.write(data[0:0x4] + chr(0xFF) + data[0x5:])
         self.dummy3.flush()
 
     @LIB_CORE
@@ -710,8 +1100,6 @@ class Test_open(unittest.TestCase):
         finally:
             os.chmod(self.dummy1.name, 0600)
 
-        #ensure a file whose __init__ method triggers InvalidFile
-        #raises UnsupportedFile
         self.assertRaises(audiotools.InvalidFile,
                           audiotools.open,
                           self.dummy3.name)
@@ -838,6 +1226,7 @@ class Test_pcm_frame_cmp(unittest.TestCase):
                 audiotools.PCMCat(iter([BLANK_PCM_Reader(1),
                                         RANDOM_PCM_Reader(1)]))), 44100)
 
+
 class Test_pcm_split(unittest.TestCase):
     @LIB_CORE
     def test_pcm_split(self):
@@ -851,6 +1240,7 @@ class Test_pcm_split(unittest.TestCase):
             counter = FrameCounter(2, 16, 44100)
             audiotools.transfer_framelist_data(sub_pcm, counter.update)
             self.assertEqual(sub_frames, int(counter) * 44100)
+
 
 class Test_str_width(unittest.TestCase):
     @LIB_CORE
@@ -1123,36 +1513,29 @@ class TestFrameList(unittest.TestCase):
         unsigned_ints = range(0, 0xFF + 1)
         signed_ints = range(-0x80, 0x7F + 1)
 
-        UB8Int = audiotools.Con.GreedyRepeater(audiotools.Con.UBInt8(None))
-        UL8Int = audiotools.Con.GreedyRepeater(audiotools.Con.ULInt8(None))
-        SB8Int = audiotools.Con.GreedyRepeater(audiotools.Con.SBInt8(None))
-        SL8Int = audiotools.Con.GreedyRepeater(audiotools.Con.UBInt8(None))
-
         #unsigned, big-endian
         self.assertEqual([i - (1 << 7) for i in unsigned_ints],
                          list(audiotools.pcm.FrameList(
-                    UB8Int.build(unsigned_ints),
+                    struct.pack(">%dB" % (len(unsigned_ints)), *unsigned_ints),
                     1, 8, True, False)))
 
         #unsigned, little-endian
         self.assertEqual([i - (1 << 7) for i in unsigned_ints],
                          list(audiotools.pcm.FrameList(
-                    UL8Int.build(unsigned_ints),
+                    struct.pack("<%dB" % (len(unsigned_ints)), *unsigned_ints),
                     1, 8, False, False)))
 
         #signed, big-endian
         self.assertEqual(signed_ints,
                          list(audiotools.pcm.FrameList(
-                    SB8Int.build(signed_ints),
+                    struct.pack(">%db" % (len(signed_ints)), *signed_ints),
                     1, 8, True, True)))
 
-        #this test triggers a DeprecationWarning
-        #which is odd since signed little-endian 8 bit
-        #should be the same as signed big-endian 8 bit
-        # self.assertEqual(signed_ints,
-        #                  list(audiotools.pcm.FrameList(
-        #             SL8Int.build(signed_ints),
-        #             1,8,0,1)))
+        #signed, little-endian
+        self.assertEqual(signed_ints,
+                         list(audiotools.pcm.FrameList(
+                    struct.pack("<%db" % (len(signed_ints)), *signed_ints),
+                    1, 8, 0, 1)))
 
     @LIB_CORE
     def test_8bit_roundtrip_str(self):
@@ -1187,33 +1570,28 @@ class TestFrameList(unittest.TestCase):
         unsigned_ints = range(0, 0xFFFF + 1)
         signed_ints = range(-0x8000, 0x7FFF + 1)
 
-        UB16Int = audiotools.Con.GreedyRepeater(audiotools.Con.UBInt16(None))
-        UL16Int = audiotools.Con.GreedyRepeater(audiotools.Con.ULInt16(None))
-        SB16Int = audiotools.Con.GreedyRepeater(audiotools.Con.SBInt16(None))
-        SL16Int = audiotools.Con.GreedyRepeater(audiotools.Con.SLInt16(None))
-
         #unsigned, big-endian
         self.assertEqual([i - (1 << 15) for i in unsigned_ints],
                          list(audiotools.pcm.FrameList(
-                    UB16Int.build(unsigned_ints),
+                    struct.pack(">%dH" % (len(unsigned_ints)), *unsigned_ints),
                     1, 16, True, False)))
 
         #unsigned, little-endian
         self.assertEqual([i - (1 << 15) for i in unsigned_ints],
                          list(audiotools.pcm.FrameList(
-                    UL16Int.build(unsigned_ints),
+                    struct.pack("<%dH" % (len(unsigned_ints)), *unsigned_ints),
                     1, 16, False, False)))
 
         #signed, big-endian
         self.assertEqual(signed_ints,
                          list(audiotools.pcm.FrameList(
-                    SB16Int.build(signed_ints),
+                    struct.pack(">%dh" % (len(signed_ints)), *signed_ints),
                     1, 16, True, True)))
 
         #signed, little-endian
         self.assertEqual(signed_ints,
                          list(audiotools.pcm.FrameList(
-                    SL16Int.build(signed_ints),
+                    struct.pack("<%dh" % (len(signed_ints)), *signed_ints),
                     1, 16, False, True)))
 
     @LIB_CORE
@@ -1253,56 +1631,31 @@ class TestFrameList(unittest.TestCase):
     @LIB_CORE
     def test_24bit_roundtrip(self):
         import audiotools.pcm
+        from audiotools.bitstream import BitstreamRecorder
 
         #setting this higher than 1 means we only test a sample
-        #of the fill 24-bit value range
+        #of the full 24-bit value range
         #since testing the whole range takes a very, very long time
         RANGE = 8
 
         unsigned_ints_high = [r << 8 for r in xrange(0, 0xFFFF + 1)]
         signed_ints_high = [r << 8 for r in xrange(-0x8000, 0x7FFF + 1)]
 
-        UB24Int = audiotools.Con.BitStruct(
-            None,
-            audiotools.Con.GreedyRepeater(audiotools.Con.Bits("i",
-                                                              length=24,
-                                                              swapped=False,
-                                                              signed=False)))
-
-        UL24Int = audiotools.Con.BitStruct(
-            None,
-            audiotools.Con.GreedyRepeater(audiotools.Con.Bits("i",
-                                                              length=24,
-                                                              swapped=True,
-                                                              signed=False)))
-
-        SB24Int = audiotools.Con.BitStruct(
-            None,
-            audiotools.Con.GreedyRepeater(audiotools.Con.Bits("i",
-                                                              length=24,
-                                                              swapped=False,
-                                                              signed=True)))
-
-        SL24Int = audiotools.Con.BitStruct(
-            None,
-            audiotools.Con.GreedyRepeater(audiotools.Con.Bits("i",
-                                                              length=24,
-                                                              swapped=True,
-                                                              signed=True)))
-
         for low_bits in xrange(0, 0xFF + 1, RANGE):
             unsigned_values = [high_bits | low_bits for high_bits in
                                unsigned_ints_high]
 
+            rec = BitstreamRecorder(0)
+            rec.build("24u" * len(unsigned_values), unsigned_values)
             self.assertEqual([i - (1 << 23) for i in unsigned_values],
                              list(audiotools.pcm.FrameList(
-                        UB24Int.build(Con.Container(i=unsigned_values)),
-                        1, 24, True, False)))
+                        rec.data(), 1, 24, True, False)))
 
+            rec = BitstreamRecorder(1)
+            rec.build("24u" * len(unsigned_values), unsigned_values)
             self.assertEqual([i - (1 << 23) for i in unsigned_values],
                              list(audiotools.pcm.FrameList(
-                        UL24Int.build(Con.Container(i=unsigned_values)),
-                        1, 24, False, False)))
+                        rec.data(), 1, 24, False, False)))
 
         for low_bits in xrange(0, 0xFF + 1, RANGE):
             if (high_bits < 0):
@@ -1312,15 +1665,17 @@ class TestFrameList(unittest.TestCase):
                 signed_values = [high_bits + low_bits for high_bits in
                                  signed_ints_high]
 
+            rec = BitstreamRecorder(0)
+            rec.build("24s" * len(signed_values), signed_values)
             self.assertEqual(signed_values,
                              list(audiotools.pcm.FrameList(
-                        SB24Int.build(Con.Container(i=signed_values)),
-                        1, 24, True, True)))
+                        rec.data(), 1, 24, True, True)))
 
+            rec = BitstreamRecorder(1)
+            rec.build("24s" * len(signed_values), signed_values)
             self.assertEqual(signed_values,
                              list(audiotools.pcm.FrameList(
-                        SL24Int.build(Con.Container(i=signed_values)),
-                        1, 24, False, True)))
+                        rec.data(), 1, 24, False, True)))
 
     @LIB_CORE
     def test_24bit_roundtrip_str(self):
@@ -1386,6 +1741,28 @@ class TestFrameList(unittest.TestCase):
                                 temp_track2.close()
             finally:
                 temp_track.close()
+
+    @LIB_CORE
+    def test_errors(self):
+        #check list that's too large
+        self.assertRaises(ValueError,
+                          audiotools.pcm.FloatFrameList,
+                          [0.0] * 5, 2)
+
+        #check list that's too small
+        self.assertRaises(ValueError,
+                          audiotools.pcm.FloatFrameList,
+                          [0.0] * 3, 2)
+
+        #check channels <= 0
+        self.assertRaises(ValueError,
+                          audiotools.pcm.FloatFrameList,
+                          [0.0] * 4, 0)
+
+        self.assertRaises(ValueError,
+                          audiotools.pcm.FloatFrameList,
+                          [0.0] * 4, -1)
+
 
 class TestFloatFrameList(unittest.TestCase):
     @LIB_CORE
@@ -1499,6 +1876,33 @@ class TestFloatFrameList(unittest.TestCase):
                 l,
                 list(audiotools.pcm.from_list(l, 1, bps, True).to_float().to_int(bps)))
 
+    @LIB_CORE
+    def test_errors(self):
+        #check string that's too large
+        self.assertRaises(ValueError,
+                          audiotools.pcm.FrameList,
+                          chr(0) * 5, 2, 16, 1, 1)
+
+        #check string that's too small
+        self.assertRaises(ValueError,
+                          audiotools.pcm.FrameList,
+                          chr(0) * 3, 2, 16, 1, 1)
+
+        #check channels <= 0
+        self.assertRaises(ValueError,
+                          audiotools.pcm.FrameList,
+                          chr(0) * 4, 0, 16, 1, 1)
+
+        self.assertRaises(ValueError,
+                          audiotools.pcm.FrameList,
+                          chr(0) * 4, -1, 16, 1, 1)
+
+        #check bps != 8,16,24
+        for bps in [0, 7, 9, 15, 17, 23, 25, 64]:
+            self.assertRaises(ValueError,
+                              audiotools.pcm.FrameList,
+                              chr(0) * 4, 2, bps, 1, 1)
+
 
 class __SimpleChunkReader__:
     def __init__(self, chunks):
@@ -1518,16 +1922,478 @@ class __SimpleChunkReader__:
     def close(self):
         pass
 
-class Bitstream(unittest.TestCase):
-    @LIB_CORE
-    def test_simple_reader(self):
-        from audiotools.decoders import BitstreamReader
 
-        # self.assertRaises(TypeError, BitstreamReader, None, 0)
-        # self.assertRaises(TypeError, BitstreamReader, 1, 0)
-        # self.assertRaises(TypeError, BitstreamReader, "foo", 0)
-        # self.assertRaises(TypeError, BitstreamReader,
-        #                   cStringIO.StringIO("foo"), 0)
+class ByteCounter:
+    def __init__(self):
+        self.bytes = 0
+
+    def __int__(self):
+        return self.bytes
+
+    def reset(self):
+        self.bytes = 0
+
+    def callback(self, i):
+        self.bytes += 1
+
+
+class Bitstream(unittest.TestCase):
+    def __test_big_endian_reader__(self, reader, table):
+        #check the bitstream reader
+        #against some known big-endian values
+
+        reader.mark()
+        self.assertEqual(reader.read(2), 0x2)
+        self.assertEqual(reader.read(3), 0x6)
+        self.assertEqual(reader.read(5), 0x07)
+        self.assertEqual(reader.read(3), 0x5)
+        self.assertEqual(reader.read(19), 0x53BC1)
+
+        reader.rewind()
+        self.assertEqual(reader.read64(2), 0x2)
+        self.assertEqual(reader.read64(3), 0x6)
+        self.assertEqual(reader.read64(5), 0x07)
+        self.assertEqual(reader.read64(3), 0x5)
+        self.assertEqual(reader.read64(19), 0x53BC1)
+
+        reader.rewind()
+        self.assertEqual(reader.read(2), 0x2)
+        reader.skip(3)
+        self.assertEqual(reader.read(5), 0x07)
+        reader.skip(3)
+        self.assertEqual(reader.read(19), 0x53BC1)
+
+        reader.rewind()
+        self.assertEqual(reader.read(1), 1)
+        bit = reader.read(1)
+        self.assertEqual(bit, 0)
+        reader.unread(bit)
+        self.assertEqual(reader.read(2), 1)
+        reader.byte_align()
+
+        reader.rewind()
+        self.assertEqual(reader.read(8), 0xB1)
+        reader.unread(0)
+        self.assertEqual(reader.read(1), 0)
+        reader.unread(1)
+        self.assertEqual(reader.read(1), 1)
+
+        reader.rewind()
+        self.assertEqual(reader.read_signed(2), -2)
+        self.assertEqual(reader.read_signed(3), -2)
+        self.assertEqual(reader.read_signed(5), 7)
+        self.assertEqual(reader.read_signed(3), -3)
+        self.assertEqual(reader.read_signed(19), -181311)
+
+        reader.rewind()
+        self.assertEqual(reader.read_signed64(2), -2)
+        self.assertEqual(reader.read_signed64(3), -2)
+        self.assertEqual(reader.read_signed64(5), 7)
+        self.assertEqual(reader.read_signed64(3), -3)
+        self.assertEqual(reader.read_signed64(19), -181311)
+
+        reader.rewind()
+        self.assertEqual(reader.unary(0), 1)
+        self.assertEqual(reader.unary(0), 2)
+        self.assertEqual(reader.unary(0), 0)
+        self.assertEqual(reader.unary(0), 0)
+        self.assertEqual(reader.unary(0), 4)
+
+        reader.rewind()
+        self.assertEqual(reader.unary(1), 0)
+        self.assertEqual(reader.unary(1), 1)
+        self.assertEqual(reader.unary(1), 0)
+        self.assertEqual(reader.unary(1), 3)
+        self.assertEqual(reader.unary(1), 0)
+
+        reader.rewind()
+        self.assertEqual(reader.limited_unary(0, 2), 1)
+        self.assertEqual(reader.limited_unary(0, 2), None)
+        reader.rewind()
+        self.assertEqual(reader.limited_unary(1, 2), 0)
+        self.assertEqual(reader.limited_unary(1, 2), 1)
+        self.assertEqual(reader.limited_unary(1, 2), 0)
+        self.assertEqual(reader.limited_unary(1, 2), None)
+
+        reader.rewind()
+        self.assertEqual(reader.read_huffman_code(table), 1)
+        self.assertEqual(reader.read_huffman_code(table), 0)
+        self.assertEqual(reader.read_huffman_code(table), 4)
+        self.assertEqual(reader.read_huffman_code(table), 0)
+        self.assertEqual(reader.read_huffman_code(table), 0)
+        self.assertEqual(reader.read_huffman_code(table), 2)
+        self.assertEqual(reader.read_huffman_code(table), 1)
+        self.assertEqual(reader.read_huffman_code(table), 1)
+        self.assertEqual(reader.read_huffman_code(table), 2)
+        self.assertEqual(reader.read_huffman_code(table), 0)
+        self.assertEqual(reader.read_huffman_code(table), 2)
+        self.assertEqual(reader.read_huffman_code(table), 0)
+        self.assertEqual(reader.read_huffman_code(table), 1)
+        self.assertEqual(reader.read_huffman_code(table), 4)
+        self.assertEqual(reader.read_huffman_code(table), 2)
+
+        reader.rewind()
+        self.assertEqual(reader.read(3), 5)
+        reader.byte_align()
+        self.assertEqual(reader.read(3), 7)
+        reader.byte_align()
+        reader.byte_align()
+        self.assertEqual(reader.read(8), 59)
+        reader.byte_align()
+        self.assertEqual(reader.read(4), 12)
+
+        reader.rewind()
+        self.assertEqual(reader.read_bytes(2), "\xB1\xED")
+        reader.rewind()
+        self.assertEqual(reader.read(4), 11)
+        self.assertEqual(reader.read_bytes(2), "\x1E\xD3")
+
+        reader.rewind()
+        self.assertEqual(reader.read(3), 5)
+        reader.set_endianness(1)
+        self.assertEqual(reader.read(3), 5)
+        reader.set_endianness(0)
+        self.assertEqual(reader.read(4), 3)
+        reader.set_endianness(0)
+        self.assertEqual(reader.read(4), 12)
+
+        reader.rewind()
+        reader.mark()
+        self.assertEqual(reader.read(4), 0xB)
+        reader.rewind()
+        self.assertEqual(reader.read(8), 0xB1)
+        reader.rewind()
+        self.assertEqual(reader.read(12), 0xB1E)
+        reader.unmark()
+        reader.mark()
+        self.assertEqual(reader.read(4), 0xD)
+        reader.rewind()
+        self.assertEqual(reader.read(8), 0xD3)
+        reader.rewind()
+        self.assertEqual(reader.read(12), 0xD3B)
+        reader.unmark()
+
+        reader.rewind()
+        reader.unmark()
+
+    def __test_little_endian_reader__(self, reader, table):
+        #check the bitstream reader
+        #against some known little-endian values
+
+        reader.mark()
+        self.assertEqual(reader.read(2), 0x1)
+        self.assertEqual(reader.read(3), 0x4)
+        self.assertEqual(reader.read(5), 0x0D)
+        self.assertEqual(reader.read(3), 0x3)
+        self.assertEqual(reader.read(19), 0x609DF)
+
+        reader.rewind()
+        self.assertEqual(reader.read64(2), 1)
+        self.assertEqual(reader.read64(3), 4)
+        self.assertEqual(reader.read64(5), 13)
+        self.assertEqual(reader.read64(3), 3)
+        self.assertEqual(reader.read64(19), 395743)
+
+        reader.rewind()
+        self.assertEqual(reader.read(2), 0x1)
+        reader.skip(3)
+        self.assertEqual(reader.read(5), 0x0D)
+        reader.skip(3)
+        self.assertEqual(reader.read(19), 0x609DF)
+
+        reader.rewind()
+        self.assertEqual(reader.read(1), 1)
+        bit = reader.read(1)
+        self.assertEqual(bit, 0)
+        reader.unread(bit)
+        self.assertEqual(reader.read(4), 8)
+        reader.byte_align()
+
+        reader.rewind()
+        self.assertEqual(reader.read(8), 0xB1)
+        reader.unread(0)
+        self.assertEqual(reader.read(1), 0)
+        reader.unread(1)
+        self.assertEqual(reader.read(1), 1)
+
+        reader.rewind()
+        self.assertEqual(reader.read_signed(2), 1)
+        self.assertEqual(reader.read_signed(3), -4)
+        self.assertEqual(reader.read_signed(5), 13)
+        self.assertEqual(reader.read_signed(3), 3)
+        self.assertEqual(reader.read_signed(19), -128545)
+
+        reader.rewind()
+        self.assertEqual(reader.read_signed64(2), 1)
+        self.assertEqual(reader.read_signed64(3), -4)
+        self.assertEqual(reader.read_signed64(5), 13)
+        self.assertEqual(reader.read_signed64(3), 3)
+        self.assertEqual(reader.read_signed64(19), -128545)
+
+        reader.rewind()
+        self.assertEqual(reader.unary(0), 1)
+        self.assertEqual(reader.unary(0), 0)
+        self.assertEqual(reader.unary(0), 0)
+        self.assertEqual(reader.unary(0), 2)
+        self.assertEqual(reader.unary(0), 2)
+
+        reader.rewind()
+        self.assertEqual(reader.unary(1), 0)
+        self.assertEqual(reader.unary(1), 3)
+        self.assertEqual(reader.unary(1), 0)
+        self.assertEqual(reader.unary(1), 1)
+        self.assertEqual(reader.unary(1), 0)
+
+        reader.rewind()
+        self.assertEqual(reader.limited_unary(0, 2), 1)
+        self.assertEqual(reader.limited_unary(0, 2), 0)
+        self.assertEqual(reader.limited_unary(0, 2), 0)
+        self.assertEqual(reader.limited_unary(0, 2), None)
+
+        reader.rewind()
+        self.assertEqual(reader.read_huffman_code(table), 1)
+        self.assertEqual(reader.read_huffman_code(table), 3)
+        self.assertEqual(reader.read_huffman_code(table), 1)
+        self.assertEqual(reader.read_huffman_code(table), 0)
+        self.assertEqual(reader.read_huffman_code(table), 2)
+        self.assertEqual(reader.read_huffman_code(table), 1)
+        self.assertEqual(reader.read_huffman_code(table), 0)
+        self.assertEqual(reader.read_huffman_code(table), 0)
+        self.assertEqual(reader.read_huffman_code(table), 1)
+        self.assertEqual(reader.read_huffman_code(table), 0)
+        self.assertEqual(reader.read_huffman_code(table), 1)
+        self.assertEqual(reader.read_huffman_code(table), 2)
+        self.assertEqual(reader.read_huffman_code(table), 4)
+        self.assertEqual(reader.read_huffman_code(table), 3)
+
+        reader.rewind()
+        self.assertEqual(reader.read_bytes(2), "\xB1\xED")
+        reader.rewind()
+        self.assertEqual(reader.read(4), 1)
+
+        self.assertEqual(reader.read_bytes(2), "\xDB\xBE")
+
+        reader.rewind()
+        self.assertEqual(reader.read(3), 1)
+        reader.byte_align()
+        self.assertEqual(reader.read(3), 5)
+        reader.byte_align()
+        reader.byte_align()
+        self.assertEqual(reader.read(8), 59)
+        reader.byte_align()
+        self.assertEqual(reader.read(4), 1)
+
+        reader.rewind()
+        self.assertEqual(reader.read(3), 1)
+        reader.set_endianness(0)
+        self.assertEqual(reader.read(3), 7)
+        reader.set_endianness(1)
+        self.assertEqual(reader.read(4), 11)
+        reader.set_endianness(1)
+        self.assertEqual(reader.read(4), 1)
+
+        reader.rewind()
+        self.assertEqual(reader.limited_unary(1, 2), 0)
+        self.assertEqual(reader.limited_unary(1, 2), None)
+
+        reader.rewind()
+        reader.mark()
+        self.assertEqual(reader.read(4), 0x1)
+        reader.rewind()
+        self.assertEqual(reader.read(8), 0xB1)
+        reader.rewind()
+        self.assertEqual(reader.read(12), 0xDB1)
+        reader.unmark()
+        reader.mark()
+        self.assertEqual(reader.read(4), 0xE)
+        reader.rewind()
+        self.assertEqual(reader.read(8), 0xBE)
+        reader.rewind()
+        self.assertEqual(reader.read(12), 0x3BE)
+        reader.unmark()
+
+        reader.rewind()
+        reader.unmark()
+
+    def __test_try__(self, reader, table):
+        reader.mark()
+
+        #bounce to the very end of the stream
+        reader.skip(31)
+        reader.mark()
+        self.assertEqual(reader.read(1), 1)
+        reader.rewind()
+
+        #then test all the read methods to ensure they trigger br_abort
+        #in the case of unary/Huffman, the stream ends on a "1" bit
+        #whether reading it big-endian or little-endian
+
+        self.assertRaises(IOError, reader.read, 2)
+        reader.rewind()
+        self.assertRaises(IOError, reader.read64, 2)
+        reader.rewind()
+        self.assertRaises(IOError, reader.read_signed, 2)
+        reader.rewind()
+        self.assertRaises(IOError, reader.read_signed64, 2)
+        reader.rewind()
+        self.assertRaises(IOError, reader.skip, 2)
+        reader.rewind()
+        self.assertRaises(IOError, reader.unary, 0)
+        reader.rewind()
+        self.assertEqual(reader.unary(1), 0)
+        self.assertRaises(IOError, reader.unary, 1)
+        reader.rewind()
+        self.assertRaises(IOError, reader.limited_unary, 0, 3)
+        reader.rewind()
+        self.assertEqual(reader.limited_unary(1, 3), 0)
+        self.assertRaises(IOError, reader.limited_unary, 1, 3)
+        reader.rewind()
+        self.assertRaises(IOError, reader.read_huffman_code, table)
+        reader.rewind()
+        self.assertRaises(IOError, reader.read_bytes, 2)
+        reader.rewind()
+        self.assertRaises(IOError, reader.substream, 1)
+
+        reader.unmark()
+
+        reader.rewind()
+        reader.unmark()
+
+    def __test_callbacks_reader__(self,
+                                  reader,
+                                  unary_0_reads,
+                                  unary_1_reads,
+                                  table,
+                                  huffman_code_count):
+        counter = ByteCounter()
+        reader.mark()
+        reader.add_callback(counter.callback)
+
+        #a single callback
+        counter.reset()
+        for i in xrange(8):
+            reader.read(4)
+        self.assertEqual(int(counter), 4)
+        reader.rewind()
+
+        #calling callbacks directly
+        counter.reset()
+        for i in xrange(20):
+            reader.call_callbacks(0)
+        self.assertEqual(int(counter), 20)
+
+        #two callbacks
+        counter.reset()
+        reader.add_callback(counter.callback)
+        for i in xrange(8):
+            reader.read(4)
+        self.assertEqual(int(counter), 8)
+        reader.pop_callback()
+        reader.rewind()
+
+        #temporarily suspending the callback
+        counter.reset()
+        reader.read(8)
+        self.assertEqual(int(counter), 1)
+        callback = reader.pop_callback()
+        reader.read(8)
+        reader.read(8)
+        reader.add_callback(counter.callback)
+        reader.read(8)
+        self.assertEqual(int(counter), 2)
+        reader.rewind()
+
+        #temporarily adding two callbacks
+        counter.reset()
+        reader.read(8)
+        self.assertEqual(int(counter), 1)
+        reader.add_callback(counter.callback)
+        reader.read(8)
+        reader.read(8)
+        reader.pop_callback()
+        reader.read(8)
+        self.assertEqual(int(counter), 6)
+        reader.rewind()
+
+        #read_signed
+        counter.reset()
+        for i in xrange(8):
+            reader.read_signed(4)
+        self.assertEqual(int(counter), 4)
+        reader.rewind()
+
+        #read_64
+        counter.reset()
+        for i in xrange(8):
+            reader.read64(4)
+        self.assertEqual(int(counter), 4)
+        reader.rewind()
+
+        #skip
+        counter.reset()
+        for i in xrange(8):
+            reader.skip(4)
+        self.assertEqual(int(counter), 4)
+        reader.rewind()
+
+        #read_unary
+        counter.reset()
+        for i in xrange(unary_0_reads):
+            reader.unary(0)
+        self.assertEqual(int(counter), 4)
+        counter.reset()
+        reader.rewind()
+        for i in xrange(unary_1_reads):
+            reader.unary(1)
+        self.assertEqual(int(counter), 4)
+        reader.rewind()
+
+        #read_limited_unary
+        counter.reset()
+        for i in xrange(unary_0_reads):
+            reader.limited_unary(0, 6)
+        self.assertEqual(int(counter), 4)
+        counter.reset()
+        reader.rewind()
+        for i in xrange(unary_1_reads):
+            reader.limited_unary(1, 6)
+        self.assertEqual(int(counter), 4)
+        reader.rewind()
+
+        #read_huffman_code
+        counter.reset()
+        for i in xrange(huffman_code_count):
+            reader.read_huffman_code(table)
+        self.assertEqual(int(counter), 4)
+        reader.rewind()
+
+        #read_bytes
+        counter.reset()
+        reader.read_bytes(2)
+        reader.read_bytes(2)
+        self.assertEqual(int(counter), 4)
+        reader.rewind()
+
+        reader.pop_callback()
+        reader.unmark()
+
+    @LIB_BITSTREAM
+    def test_init_error(self):
+        from audiotools.bitstream import BitstreamAccumulator
+        from audiotools.bitstream import BitstreamReader
+        from audiotools.bitstream import BitstreamRecorder
+        from audiotools.bitstream import BitstreamWriter
+
+        self.assertRaises(TypeError, BitstreamAccumulator)
+        self.assertRaises(TypeError, BitstreamAccumulator, None)
+        self.assertRaises(TypeError, BitstreamRecorder)
+        self.assertRaises(TypeError, BitstreamRecorder, None)
+        self.assertRaises(TypeError, BitstreamWriter)
+        self.assertRaises(TypeError, BitstreamReader)
+
+    @LIB_BITSTREAM
+    def test_simple_reader(self):
+        from audiotools.bitstream import BitstreamReader, HuffmanTree
 
         temp = tempfile.TemporaryFile()
         try:
@@ -1537,169 +2403,729 @@ class Bitstream(unittest.TestCase):
             temp.write(chr(0xC1))
             temp.seek(0, 0)
 
-            #first, check the bitstream reader
-            #against some simple known big-endian values
-            bitstream = BitstreamReader(temp, 0)
-
-            self.assertEqual(bitstream.read(2), 2)
-            self.assertEqual(bitstream.read(3), 6)
-            self.assertEqual(bitstream.read(5), 7)
-            self.assertEqual(bitstream.read(3), 5)
-            self.assertEqual(bitstream.read(19), 342977)
-            self.assertEqual(bitstream.tell(), 4)
-
-            temp.seek(0, 0)
-            self.assertEqual(bitstream.read64(2), 2)
-            self.assertEqual(bitstream.read64(3), 6)
-            self.assertEqual(bitstream.read64(5), 7)
-            self.assertEqual(bitstream.read64(3), 5)
-            self.assertEqual(bitstream.read64(19), 342977)
-            self.assertEqual(bitstream.tell(), 4)
+            #test a big-endian stream built from a file
+            reader = BitstreamReader(temp, 0)
+            table_be = HuffmanTree([[1, 1], 0,
+                                    [1, 0], 1,
+                                    [0, 1], 2,
+                                    [0, 0, 1], 3,
+                                    [0, 0, 0], 4], 0)
+            self.__test_big_endian_reader__(reader, table_be)
+            self.__test_try__(reader, table_be)
+            self.__test_callbacks_reader__(reader, 14, 18, table_be, 14)
 
             temp.seek(0, 0)
-            self.assertEqual(bitstream.read_signed(2), -2)
-            self.assertEqual(bitstream.read_signed(3), -2)
-            self.assertEqual(bitstream.read_signed(5), 7)
-            self.assertEqual(bitstream.read_signed(3), -3)
-            self.assertEqual(bitstream.read_signed(19), -181311)
-            self.assertEqual(bitstream.tell(), 4)
 
-            temp.seek(0, 0)
-            self.assertEqual(bitstream.unary(0), 1)
-            self.assertEqual(bitstream.unary(0), 2)
-            self.assertEqual(bitstream.unary(0), 0)
-            self.assertEqual(bitstream.unary(0), 0)
-            self.assertEqual(bitstream.unary(0), 4)
-            bitstream.byte_align()
-            temp.seek(0, 0)
-            self.assertEqual(bitstream.unary(1), 0)
-            self.assertEqual(bitstream.unary(1), 1)
-            self.assertEqual(bitstream.unary(1), 0)
-            self.assertEqual(bitstream.unary(1), 3)
-            self.assertEqual(bitstream.unary(1), 0)
-            bitstream.byte_align()
+            #test a little-endian stream built from a file
+            reader = BitstreamReader(temp, 1)
+            table_le = HuffmanTree([[1, 1], 0,
+                                    [1, 0], 1,
+                                    [0, 1], 2,
+                                    [0, 0, 1], 3,
+                                    [0, 0, 0], 4], 1)
+            self.__test_little_endian_reader__(reader, table_le)
+            self.__test_try__(reader, table_le)
+            self.__test_callbacks_reader__(reader, 14, 18, table_le, 13)
 
+            #pad the stream with some additional data at both ends
             temp.seek(0, 0)
-            self.assertEqual(bitstream.read(1), 1)
-            bit = bitstream.read(1)
-            self.assertEqual(bit, 0)
-            bitstream.unread(bit)
-            self.assertEqual(bitstream.read(2), 1)
-            bitstream.byte_align()
-
-            temp.seek(0, 0)
-            self.assertEqual(bitstream.limited_unary(0, 2), 1)
-            self.assertEqual(bitstream.limited_unary(0, 2), None)
-            bitstream.byte_align()
-            temp.seek(0, 0)
-            self.assertEqual(bitstream.limited_unary(1, 2), 0)
-            self.assertEqual(bitstream.limited_unary(1, 2), 1)
-            self.assertEqual(bitstream.limited_unary(1, 2), 0)
-            self.assertEqual(bitstream.limited_unary(1, 2), None)
-
-            temp.seek(0, 0)
-            bitstream.byte_align()
-            bitstream.mark()
-            self.assertEqual(bitstream.read(4), 0xB)
-            bitstream.rewind()
-            self.assertEqual(bitstream.read(8), 0xB1)
-            bitstream.rewind()
-            self.assertEqual(bitstream.read(12), 0xB1E)
-            bitstream.unmark()
-            bitstream.mark()
-            self.assertEqual(bitstream.read(4), 0xD)
-            bitstream.rewind()
-            self.assertEqual(bitstream.read(8), 0xD3)
-            bitstream.rewind()
-            self.assertEqual(bitstream.read(12), 0xD3B)
-            bitstream.unmark()
-
-
-            del(bitstream)
+            temp.write(chr(0xFF))
+            temp.write(chr(0xFF))
+            temp.write(chr(0xB1))
+            temp.write(chr(0xED))
+            temp.write(chr(0x3B))
+            temp.write(chr(0xC1))
+            temp.write(chr(0xFF))
+            temp.write(chr(0xFF))
+            temp.flush()
             temp.seek(0, 0)
 
-            #then, check the bitstream reader
-            #against some simple known little-endian values
-            bitstream = BitstreamReader(temp, 1)
+            reader = BitstreamReader(temp, 0)
+            reader.mark()
 
-            self.assertEqual(bitstream.read(2), 1)
-            self.assertEqual(bitstream.read(3), 4)
-            self.assertEqual(bitstream.read(5), 13)
-            self.assertEqual(bitstream.read(3), 3)
-            self.assertEqual(bitstream.read(19), 395743)
-            self.assertEqual(bitstream.tell(), 4)
+            #check a big-endian substream built from a file
+            reader.skip(16)
+            subreader = reader.substream(4)
+            self.__test_big_endian_reader__(subreader, table_be)
+            self.__test_try__(subreader, table_be)
+            self.__test_callbacks_reader__(subreader, 14, 18, table_be, 13)
 
-            temp.seek(0, 0)
-            self.assertEqual(bitstream.read64(2), 1)
-            self.assertEqual(bitstream.read64(3), 4)
-            self.assertEqual(bitstream.read64(5), 13)
-            self.assertEqual(bitstream.read64(3), 3)
-            self.assertEqual(bitstream.read64(19), 395743)
-            self.assertEqual(bitstream.tell(), 4)
-
-            temp.seek(0, 0)
-            self.assertEqual(bitstream.read_signed(2), 1)
-            self.assertEqual(bitstream.read_signed(3), -4)
-            self.assertEqual(bitstream.read_signed(5), 13)
-            self.assertEqual(bitstream.read_signed(3), 3)
-            self.assertEqual(bitstream.read_signed(19), -128545)
-            self.assertEqual(bitstream.tell(), 4)
+            #check a big-endian substream built from another substream
+            reader.rewind()
+            reader.skip(8)
+            subreader1 = reader.substream(6)
+            subreader1.skip(8)
+            subreader2 = subreader.substream(4)
+            self.__test_big_endian_reader__(subreader2, table_be)
+            self.__test_try__(subreader2, table_be)
+            self.__test_callbacks_reader__(subreader2, 14, 18, table_be, 13)
+            reader.unmark()
 
             temp.seek(0, 0)
-            self.assertEqual(bitstream.unary(0), 1)
-            self.assertEqual(bitstream.unary(0), 0)
-            self.assertEqual(bitstream.unary(0), 0)
-            self.assertEqual(bitstream.unary(0), 2)
-            self.assertEqual(bitstream.unary(0), 2)
-            bitstream.byte_align()
-            temp.seek(0, 0)
-            self.assertEqual(bitstream.unary(1), 0)
-            self.assertEqual(bitstream.unary(1), 3)
-            self.assertEqual(bitstream.unary(1), 0)
-            self.assertEqual(bitstream.unary(1), 1)
-            self.assertEqual(bitstream.unary(1), 0)
-            bitstream.byte_align()
 
-            temp.seek(0, 0)
-            self.assertEqual(bitstream.read(1), 1)
-            bit = bitstream.read(1)
-            self.assertEqual(bit, 0)
-            bitstream.unread(bit)
-            self.assertEqual(bitstream.read(4), 8)
-            bitstream.byte_align()
+            reader = BitstreamReader(temp, 1)
+            reader.mark()
 
-            temp.seek(0, 0)
-            self.assertEqual(bitstream.limited_unary(0, 2), 1)
-            self.assertEqual(bitstream.limited_unary(0, 2), 0)
-            self.assertEqual(bitstream.limited_unary(0, 2), 0)
-            self.assertEqual(bitstream.limited_unary(0, 2), None)
-            bitstream.byte_align()
-            temp.seek(0, 0)
-            self.assertEqual(bitstream.limited_unary(1, 2), 0)
-            self.assertEqual(bitstream.limited_unary(1, 2), None)
+            #check a little-endian substream built from a file
+            reader.skip(16)
+            subreader = reader.substream(4)
+            self.__test_little_endian_reader__(subreader, table_le)
+            self.__test_try__(subreader, table_le)
+            self.__test_callbacks_reader__(subreader, 14, 18, table_le, 13)
 
-            temp.seek(0, 0)
-            bitstream.byte_align()
-            bitstream.mark()
-            self.assertEqual(bitstream.read(4), 0x1)
-            bitstream.rewind()
-            self.assertEqual(bitstream.read(8), 0xB1)
-            bitstream.rewind()
-            self.assertEqual(bitstream.read(12), 0xDB1)
-            bitstream.unmark()
-            bitstream.mark()
-            self.assertEqual(bitstream.read(4), 0xE)
-            bitstream.rewind()
-            self.assertEqual(bitstream.read(8), 0xBE)
-            bitstream.rewind()
-            self.assertEqual(bitstream.read(12), 0x3BE)
-            bitstream.unmark()
+            #check a little-endian substream built from another substream
+            reader.rewind()
+            reader.skip(8)
+            subreader1 = reader.substream(6)
+            subreader1.skip(8)
+            subreader2 = subreader.substream(4)
+            self.__test_little_endian_reader__(subreader2, table_le)
+            self.__test_try__(subreader2, table_le)
+            self.__test_callbacks_reader__(subreader2, 14, 18, table_le, 13)
+            reader.unmark()
+
+            #test the writer functions with each endianness
+            self.__test_writer__(0)
+            self.__test_writer__(1)
+
         finally:
             temp.close()
 
-    @LIB_CORE
+    def __test_edge_reader_be__(self, reader):
+        reader.mark()
+
+        #try the unsigned 32 and 64 bit values
+        reader.rewind()
+        self.assertEqual(reader.read(32), 0)
+        self.assertEqual(reader.read(32), 4294967295)
+        self.assertEqual(reader.read(32), 2147483648)
+        self.assertEqual(reader.read(32), 2147483647)
+        self.assertEqual(reader.read64(64), 0)
+        self.assertEqual(reader.read64(64), 0xFFFFFFFFFFFFFFFFL)
+        self.assertEqual(reader.read64(64), 9223372036854775808L)
+        self.assertEqual(reader.read64(64), 9223372036854775807L)
+
+        #try the signed 32 and 64 bit values
+        reader.rewind()
+        self.assertEqual(reader.read_signed(32), 0)
+        self.assertEqual(reader.read_signed(32), -1)
+        self.assertEqual(reader.read_signed(32), -2147483648)
+        self.assertEqual(reader.read_signed(32), 2147483647)
+        self.assertEqual(reader.read_signed64(64), 0)
+        self.assertEqual(reader.read_signed64(64), -1)
+        self.assertEqual(reader.read_signed64(64), -9223372036854775808L)
+        self.assertEqual(reader.read_signed64(64), 9223372036854775807L)
+
+        #try the unsigned values via parse()
+        reader.rewind()
+        (u_val_1,
+         u_val_2,
+         u_val_3,
+         u_val_4,
+         u_val64_1,
+         u_val64_2,
+         u_val64_3,
+         u_val64_4) = reader.parse("32u 32u 32u 32u 64U 64U 64U 64U")
+        self.assertEqual(u_val_1, 0)
+        self.assertEqual(u_val_2, 4294967295)
+        self.assertEqual(u_val_3, 2147483648)
+        self.assertEqual(u_val_4, 2147483647)
+        self.assertEqual(u_val64_1, 0)
+        self.assertEqual(u_val64_2, 0xFFFFFFFFFFFFFFFFL)
+        self.assertEqual(u_val64_3, 9223372036854775808L)
+        self.assertEqual(u_val64_4, 9223372036854775807L)
+
+        #try the signed values via parse()
+        reader.rewind()
+        (s_val_1,
+         s_val_2,
+         s_val_3,
+         s_val_4,
+         s_val64_1,
+         s_val64_2,
+         s_val64_3,
+         s_val64_4) = reader.parse("32s 32s 32s 32s 64S 64S 64S 64S")
+        self.assertEqual(s_val_1, 0)
+        self.assertEqual(s_val_2, -1)
+        self.assertEqual(s_val_3, -2147483648)
+        self.assertEqual(s_val_4, 2147483647)
+        self.assertEqual(s_val64_1, 0)
+        self.assertEqual(s_val64_2, -1)
+        self.assertEqual(s_val64_3, -9223372036854775808L)
+        self.assertEqual(s_val64_4, 9223372036854775807L)
+
+        reader.unmark()
+
+    def __test_edge_reader_le__(self, reader):
+        reader.mark()
+
+        #try the unsigned 32 and 64 bit values
+        self.assertEqual(reader.read(32), 0)
+        self.assertEqual(reader.read(32), 4294967295)
+        self.assertEqual(reader.read(32), 2147483648)
+        self.assertEqual(reader.read(32), 2147483647)
+        self.assertEqual(reader.read64(64), 0)
+        self.assertEqual(reader.read64(64), 0xFFFFFFFFFFFFFFFFL)
+        self.assertEqual(reader.read64(64), 9223372036854775808L)
+        self.assertEqual(reader.read64(64), 9223372036854775807L)
+
+        #try the signed 32 and 64 bit values
+        reader.rewind()
+        self.assertEqual(reader.read_signed(32), 0)
+        self.assertEqual(reader.read_signed(32), -1)
+        self.assertEqual(reader.read_signed(32), -2147483648)
+        self.assertEqual(reader.read_signed(32), 2147483647)
+        self.assertEqual(reader.read_signed64(64), 0)
+        self.assertEqual(reader.read_signed64(64), -1)
+        self.assertEqual(reader.read_signed64(64), -9223372036854775808L)
+        self.assertEqual(reader.read_signed64(64), 9223372036854775807L)
+
+        #try the unsigned values via parse()
+        reader.rewind()
+        (u_val_1,
+         u_val_2,
+         u_val_3,
+         u_val_4,
+         u_val64_1,
+         u_val64_2,
+         u_val64_3,
+         u_val64_4) = reader.parse("32u 32u 32u 32u 64U 64U 64U 64U")
+        self.assertEqual(u_val_1, 0)
+        self.assertEqual(u_val_2, 4294967295)
+        self.assertEqual(u_val_3, 2147483648)
+        self.assertEqual(u_val_4, 2147483647)
+        self.assertEqual(u_val64_1, 0)
+        self.assertEqual(u_val64_2, 0xFFFFFFFFFFFFFFFFL)
+        self.assertEqual(u_val64_3, 9223372036854775808L)
+        self.assertEqual(u_val64_4, 9223372036854775807L)
+
+        #try the signed values via parse()
+        reader.rewind()
+        (s_val_1,
+         s_val_2,
+         s_val_3,
+         s_val_4,
+         s_val64_1,
+         s_val64_2,
+         s_val64_3,
+         s_val64_4) = reader.parse("32s 32s 32s 32s 64S 64S 64S 64S")
+        self.assertEqual(s_val_1, 0)
+        self.assertEqual(s_val_2, -1)
+        self.assertEqual(s_val_3, -2147483648)
+        self.assertEqual(s_val_4, 2147483647)
+        self.assertEqual(s_val64_1, 0)
+        self.assertEqual(s_val64_2, -1)
+        self.assertEqual(s_val64_3, -9223372036854775808L)
+        self.assertEqual(s_val64_4, 9223372036854775807L)
+
+        reader.unmark()
+
+    def __test_edge_writer__(self, get_writer, validate_writer):
+        #try the unsigned 32 and 64 bit values
+        (writer, temp) = get_writer()
+        writer.write(32, 0)
+        writer.write(32, 4294967295)
+        writer.write(32, 2147483648)
+        writer.write(32, 2147483647)
+        writer.write64(64, 0)
+        writer.write64(64, 0xFFFFFFFFFFFFFFFFL)
+        writer.write64(64, 9223372036854775808L)
+        writer.write64(64, 9223372036854775807L)
+        validate_writer(writer, temp)
+
+        #try the signed 32 and 64 bit values
+        (writer, temp) = get_writer()
+        writer.write_signed(32, 0)
+        writer.write_signed(32, -1)
+        writer.write_signed(32, -2147483648)
+        writer.write_signed(32, 2147483647)
+        writer.write_signed64(64, 0)
+        writer.write_signed64(64, -1)
+        writer.write_signed64(64, -9223372036854775808L)
+        writer.write_signed64(64, 9223372036854775807L)
+        validate_writer(writer, temp)
+
+        #try the unsigned values via build()
+        (writer, temp) = get_writer()
+        u_val_1 = 0
+        u_val_2 = 4294967295
+        u_val_3 = 2147483648
+        u_val_4 = 2147483647
+        u_val64_1 = 0
+        u_val64_2 = 0xFFFFFFFFFFFFFFFFL
+        u_val64_3 = 9223372036854775808L
+        u_val64_4 = 9223372036854775807L
+        writer.build("32u 32u 32u 32u 64U 64U 64U 64U",
+                     [u_val_1, u_val_2, u_val_3, u_val_4,
+                      u_val64_1, u_val64_2, u_val64_3, u_val64_4])
+        validate_writer(writer, temp)
+
+        #try the signed values via build()
+        (writer, temp) = get_writer()
+        s_val_1 = 0
+        s_val_2 = -1
+        s_val_3 = -2147483648
+        s_val_4 = 2147483647
+        s_val64_1 = 0
+        s_val64_2 = -1
+        s_val64_3 = -9223372036854775808L
+        s_val64_4 = 9223372036854775807L
+        writer.build("32s 32s 32s 32s 64S 64S 64S 64S",
+                     [s_val_1, s_val_2, s_val_3, s_val_4,
+                      s_val64_1, s_val64_2, s_val64_3, s_val64_4])
+        validate_writer(writer, temp)
+
+    def __get_edge_writer_be__(self):
+        from audiotools.bitstream import BitstreamWriter
+
+        temp_file = tempfile.NamedTemporaryFile()
+        return (BitstreamWriter(open(temp_file.name, "wb"), 0), temp_file)
+
+    def __validate_edge_writer_be__(self, writer, temp_file):
+        writer.close()
+
+        self.assertEqual(open(temp_file.name, "rb").read(),
+                         "".join(map(chr,
+                                     [0, 0, 0, 0, 255, 255, 255, 255,
+                                      128, 0, 0, 0, 127, 255, 255, 255,
+                                      0, 0, 0, 0, 0, 0, 0, 0,
+                                      255, 255, 255, 255, 255, 255, 255, 255,
+                                      128, 0, 0, 0, 0, 0, 0, 0,
+                                      127, 255, 255, 255, 255, 255, 255, 255])))
+
+        temp_file.close()
+
+    def __get_edge_recorder_be__(self):
+        from audiotools.bitstream import BitstreamRecorder
+
+        return (BitstreamRecorder(0), tempfile.NamedTemporaryFile())
+
+    def __validate_edge_recorder_be__(self, writer, temp_file):
+        from audiotools.bitstream import BitstreamWriter
+
+        writer2 = BitstreamWriter(open(temp_file.name, "wb"), 0)
+        writer.copy(writer2)
+        writer2.close()
+
+        self.assertEqual(open(temp_file.name, "rb").read(),
+                         "".join(map(chr,
+                                     [0, 0, 0, 0, 255, 255, 255, 255,
+                                      128, 0, 0, 0, 127, 255, 255, 255,
+                                      0, 0, 0, 0, 0, 0, 0, 0,
+                                      255, 255, 255, 255, 255, 255, 255, 255,
+                                      128, 0, 0, 0, 0, 0, 0, 0,
+                                      127, 255, 255, 255, 255, 255, 255, 255])))
+
+        temp_file.close()
+
+    def __get_edge_accumulator_be__(self):
+        from audiotools.bitstream import BitstreamAccumulator
+
+        return (BitstreamAccumulator(0), None)
+
+    def __validate_edge_accumulator_be__(self, writer, temp_file):
+        self.assertEqual(writer.bits(), 48 * 8)
+
+    def __get_edge_writer_le__(self):
+        from audiotools.bitstream import BitstreamWriter
+
+        temp_file = tempfile.NamedTemporaryFile()
+        return (BitstreamWriter(open(temp_file.name, "wb"), 1), temp_file)
+
+    def __validate_edge_writer_le__(self, writer, temp_file):
+        writer.close()
+
+        self.assertEqual(open(temp_file.name, "rb").read(),
+                         "".join(map(chr,
+                                     [0, 0, 0, 0, 255, 255, 255, 255,
+                                      0, 0, 0, 128, 255, 255, 255, 127,
+                                      0, 0, 0, 0, 0, 0, 0, 0,
+                                      255, 255, 255, 255, 255, 255, 255, 255,
+                                      0, 0, 0, 0, 0, 0, 0, 128,
+                                      255, 255, 255, 255, 255, 255, 255, 127])))
+
+        temp_file.close()
+
+    def __get_edge_recorder_le__(self):
+        from audiotools.bitstream import BitstreamRecorder
+
+        return (BitstreamRecorder(1), tempfile.NamedTemporaryFile())
+
+    def __validate_edge_recorder_le__(self, writer, temp_file):
+        from audiotools.bitstream import BitstreamWriter
+
+        writer2 = BitstreamWriter(open(temp_file.name, "wb"), 1)
+        writer.copy(writer2)
+        writer2.close()
+
+        self.assertEqual(open(temp_file.name, "rb").read(),
+                         "".join(map(chr,
+                                     [0, 0, 0, 0, 255, 255, 255, 255,
+                                      0, 0, 0, 128, 255, 255, 255, 127,
+                                      0, 0, 0, 0, 0, 0, 0, 0,
+                                      255, 255, 255, 255, 255, 255, 255, 255,
+                                      0, 0, 0, 0, 0, 0, 0, 128,
+                                      255, 255, 255, 255, 255, 255, 255, 127])))
+
+        temp_file.close()
+
+    def __get_edge_accumulator_le__(self):
+        from audiotools.bitstream import BitstreamAccumulator
+
+        return (BitstreamAccumulator(1), None)
+
+    def __validate_edge_accumulator_le__(self, writer, temp_file):
+        self.assertEqual(writer.bits(), 48 * 8)
+
+    def __test_writer__(self, endianness):
+        from audiotools.bitstream import BitstreamWriter
+        from audiotools.bitstream import BitstreamRecorder
+        from audiotools.bitstream import BitstreamAccumulator
+
+        checks = [self.__writer_perform_write__,
+                  self.__writer_perform_write_signed__,
+                  self.__writer_perform_write_64__,
+                  self.__writer_perform_write_signed_64__,
+                  self.__writer_perform_write_unary_0__,
+                  self.__writer_perform_write_unary_1__]
+
+        #perform file-based checks
+        for check in checks:
+            temp = tempfile.NamedTemporaryFile()
+            try:
+                writer = BitstreamWriter(open(temp.name, "wb"), endianness)
+                check(writer, endianness)
+                writer.close()
+                self.__check_output_file__(temp)
+            finally:
+                temp.close()
+
+            data = cStringIO.StringIO()
+            writer = BitstreamWriter(data, endianness)
+            check(writer, endianness)
+            del(writer)
+            self.assertEqual(data.getvalue(), "\xB1\xED\x3B\xC1")
+
+        #perform recorder-based checks
+        for check in checks:
+            temp = tempfile.NamedTemporaryFile()
+            try:
+                writer = BitstreamWriter(open(temp.name, "wb"), endianness)
+                recorder = BitstreamRecorder(endianness)
+                check(recorder, endianness)
+                recorder.copy(writer)
+                writer.close()
+                self.__check_output_file__(temp)
+                self.assertEqual(recorder.bits(), 32)
+            finally:
+                temp.close()
+
+        #perform accumulator-based checks
+        for check in checks:
+            writer = BitstreamAccumulator(endianness)
+            check(writer, endianness)
+            self.assertEqual(writer.bits(), 32)
+
+        #check swap records
+        temp = tempfile.NamedTemporaryFile()
+        try:
+            writer = BitstreamWriter(open(temp.name, "wb"), endianness)
+            recorder1 = BitstreamRecorder(endianness)
+            recorder2 = BitstreamRecorder(endianness)
+            recorder2.write(8, 0xB1)
+            recorder2.write(8, 0xED)
+            recorder1.write(8, 0x3B)
+            recorder1.write(8, 0xC1)
+            recorder1.swap(recorder2)
+            recorder1.copy(writer)
+            recorder2.copy(writer)
+            writer.close()
+            self.__check_output_file__(temp)
+        finally:
+            temp.close()
+
+        #check recorder reset
+        temp = tempfile.NamedTemporaryFile()
+        try:
+            writer = BitstreamWriter(open(temp.name, "wb"), endianness)
+            recorder = BitstreamRecorder(endianness)
+            recorder.write(8, 0xAA)
+            recorder.write(8, 0xBB)
+            recorder.write(8, 0xCC)
+            recorder.write(8, 0xDD)
+            recorder.write(8, 0xEE)
+            recorder.reset()
+            recorder.write(8, 0xB1)
+            recorder.write(8, 0xED)
+            recorder.write(8, 0x3B)
+            recorder.write(8, 0xC1)
+            recorder.copy(writer)
+            writer.close()
+            self.__check_output_file__(temp)
+        finally:
+            temp.close()
+
+        #check endianness setting
+        #FIXME
+
+        #check a file-based byte-align
+        #FIXME
+
+        #check a recorder-based byte-align
+        #FIXME
+
+        #check an accumulator-based byte-align
+        #FIXME
+
+        #check a partial dump
+        #FIXME
+
+        #check that recorder->recorder->file works
+        for check in checks:
+            temp = tempfile.NamedTemporaryFile()
+            try:
+                writer = BitstreamWriter(open(temp.name, "wb"), endianness)
+                recorder1 = BitstreamRecorder(endianness)
+                recorder2 = BitstreamRecorder(endianness)
+                self.assertEqual(recorder1.bits(), 0)
+                self.assertEqual(recorder2.bits(), 0)
+                check(recorder2, endianness)
+                self.assertEqual(recorder1.bits(), 0)
+                self.assertEqual(recorder2.bits(), 32)
+                recorder2.copy(recorder1)
+                self.assertEqual(recorder1.bits(), 32)
+                self.assertEqual(recorder2.bits(), 32)
+                recorder1.copy(writer)
+                writer.close()
+                self.__check_output_file__(temp)
+            finally:
+                temp.close()
+
+        #check that recorder->accumulator works
+        for check in checks:
+            recorder = BitstreamRecorder(endianness)
+            accumulator = BitstreamAccumulator(endianness)
+            self.assertEqual(recorder.bits(), 0)
+            self.assertEqual(accumulator.bits(), 0)
+            check(recorder, endianness)
+            self.assertEqual(recorder.bits(), 32)
+            self.assertEqual(accumulator.bits(), 0)
+            recorder.copy(accumulator)
+            self.assertEqual(recorder.bits(), 32)
+            self.assertEqual(accumulator.bits(), 32)
+
+    def __writer_perform_write__(self, writer, endianness):
+        if (endianness == 0):
+            writer.write(2, 2)
+            writer.write(3, 6)
+            writer.write(5, 7)
+            writer.write(3, 5)
+            writer.write(19, 342977)
+        else:
+            writer.write(2, 1)
+            writer.write(3, 4)
+            writer.write(5, 13)
+            writer.write(3, 3)
+            writer.write(19, 395743)
+
+    def __writer_perform_write_signed__(self, writer, endianness):
+        if (endianness == 0):
+            writer.write_signed(2, -2)
+            writer.write_signed(3, -2)
+            writer.write_signed(5, 7)
+            writer.write_signed(3, -3)
+            writer.write_signed(19, -181311)
+        else:
+            writer.write_signed(2, 1)
+            writer.write_signed(3, -4)
+            writer.write_signed(5, 13)
+            writer.write_signed(3, 3)
+            writer.write_signed(19, -128545)
+
+    def __writer_perform_write_64__(self, writer, endianness):
+        if (endianness == 0):
+            writer.write64(2, 2)
+            writer.write64(3, 6)
+            writer.write64(5, 7)
+            writer.write64(3, 5)
+            writer.write64(19, 342977)
+        else:
+            writer.write64(2, 1)
+            writer.write64(3, 4)
+            writer.write64(5, 13)
+            writer.write64(3, 3)
+            writer.write64(19, 395743)
+
+    def __writer_perform_write_signed_64__(self, writer, endianness):
+        if (endianness == 0):
+            writer.write_signed64(2, -2)
+            writer.write_signed64(3, -2)
+            writer.write_signed64(5, 7)
+            writer.write_signed64(3, -3)
+            writer.write_signed64(19, -181311)
+        else:
+            writer.write_signed64(2, 1)
+            writer.write_signed64(3, -4)
+            writer.write_signed64(5, 13)
+            writer.write_signed64(3, 3)
+            writer.write_signed64(19, -128545)
+
+    def __writer_perform_write_unary_0__(self, writer, endianness):
+        if (endianness == 0):
+            writer.unary(0, 1)
+            writer.unary(0, 2)
+            writer.unary(0, 0)
+            writer.unary(0, 0)
+            writer.unary(0, 4)
+            writer.unary(0, 2)
+            writer.unary(0, 1)
+            writer.unary(0, 0)
+            writer.unary(0, 3)
+            writer.unary(0, 4)
+            writer.unary(0, 0)
+            writer.unary(0, 0)
+            writer.unary(0, 0)
+            writer.unary(0, 0)
+            writer.write(1, 1)
+        else:
+            writer.unary(0, 1)
+            writer.unary(0, 0)
+            writer.unary(0, 0)
+            writer.unary(0, 2)
+            writer.unary(0, 2)
+            writer.unary(0, 2)
+            writer.unary(0, 5)
+            writer.unary(0, 3)
+            writer.unary(0, 0)
+            writer.unary(0, 1)
+            writer.unary(0, 0)
+            writer.unary(0, 0)
+            writer.unary(0, 0)
+            writer.unary(0, 0)
+            writer.write(2, 3)
+
+    def __writer_perform_write_unary_1__(self, writer, endianness):
+        if (endianness == 0):
+            writer.unary(1, 0)
+            writer.unary(1, 1)
+            writer.unary(1, 0)
+            writer.unary(1, 3)
+            writer.unary(1, 0)
+            writer.unary(1, 0)
+            writer.unary(1, 0)
+            writer.unary(1, 1)
+            writer.unary(1, 0)
+            writer.unary(1, 1)
+            writer.unary(1, 2)
+            writer.unary(1, 0)
+            writer.unary(1, 0)
+            writer.unary(1, 1)
+            writer.unary(1, 0)
+            writer.unary(1, 0)
+            writer.unary(1, 0)
+            writer.unary(1, 5)
+        else:
+            writer.unary(1, 0)
+            writer.unary(1, 3)
+            writer.unary(1, 0)
+            writer.unary(1, 1)
+            writer.unary(1, 0)
+            writer.unary(1, 1)
+            writer.unary(1, 0)
+            writer.unary(1, 1)
+            writer.unary(1, 0)
+            writer.unary(1, 0)
+            writer.unary(1, 0)
+            writer.unary(1, 0)
+            writer.unary(1, 1)
+            writer.unary(1, 0)
+            writer.unary(1, 0)
+            writer.unary(1, 2)
+            writer.unary(1, 5)
+            writer.unary(1, 0)
+
+    def __check_output_file__(self, temp_file):
+        self.assertEqual(open(temp_file.name, "rb").read(), "\xB1\xED\x3B\xC1")
+
+    @LIB_BITSTREAM
+    def test_edge_cases(self):
+        from audiotools.bitstream import BitstreamReader
+
+        temp = tempfile.NamedTemporaryFile()
+        try:
+            #write the temp file with a set of known big-endian data
+            temp.write("".join(map(chr,
+                                   [0, 0, 0, 0, 255, 255, 255, 255,
+                                    128, 0, 0, 0, 127, 255, 255, 255,
+                                    0, 0, 0, 0, 0, 0, 0, 0,
+                                    255, 255, 255, 255, 255, 255, 255, 255,
+                                    128, 0, 0, 0, 0, 0, 0, 0,
+                                    127, 255, 255, 255, 255, 255, 255, 255])))
+            temp.flush()
+
+            #ensure a big-endian reader reads the values correctly
+            reader = BitstreamReader(open(temp.name, "rb"), 0)
+            self.__test_edge_reader_be__(reader)
+            del(reader)
+
+            #ensure a big-endian sub-reader reads the values correctly
+            reader = BitstreamReader(open(temp.name, "rb"), 0)
+            subreader = reader.substream(48)
+            self.__test_edge_reader_be__(subreader)
+        finally:
+            temp.close()
+
+        temp = tempfile.NamedTemporaryFile()
+        try:
+            #write the temp file with a collection of known little-endian data
+            temp.write("".join(map(chr,
+                                   [0, 0, 0, 0, 255, 255, 255, 255,
+                                    0, 0, 0, 128, 255, 255, 255, 127,
+                                    0, 0, 0, 0, 0, 0, 0, 0,
+                                    255, 255, 255, 255, 255, 255, 255, 255,
+                                    0, 0, 0, 0, 0, 0, 0, 128,
+                                    255, 255, 255, 255, 255, 255, 255, 127])))
+            temp.flush()
+
+            #ensure a little-endian reader reads the values correctly
+            reader = BitstreamReader(open(temp.name, "rb"), 1)
+            self.__test_edge_reader_le__(reader)
+            del(reader)
+
+            #ensure a little-endian sub-reader reads the values correctly
+            reader = BitstreamReader(open(temp.name, "rb"), 1)
+            subreader = reader.substream(48)
+            self.__test_edge_reader_be__(subreader)
+        finally:
+            temp.close()
+
+        #test a bunch of big-endian values via the bitstream writer
+        self.__test_edge_writer__(self.__get_edge_writer_be__,
+                                  self.__validate_edge_writer_be__)
+
+        #test a bunch of big-endian values via the bitstream recorder
+        self.__test_edge_writer__(self.__get_edge_recorder_be__,
+                                  self.__validate_edge_recorder_be__)
+
+        #test a bunch of big-endian values via the bitstream accumulator
+        self.__test_edge_writer__(self.__get_edge_accumulator_be__,
+                                  self.__validate_edge_accumulator_be__)
+
+        #test a bunch of little-endian values via the bitstream writer
+        self.__test_edge_writer__(self.__get_edge_writer_le__,
+                                  self.__validate_edge_writer_le__)
+
+        #test a bunch of little-endian values via the bitstream recorder
+        self.__test_edge_writer__(self.__get_edge_recorder_le__,
+                                  self.__validate_edge_recorder_le__)
+
+        #test a bunch of little-endian values via the bitstream accumulator
+        self.__test_edge_writer__(self.__get_edge_accumulator_le__,
+                                  self.__validate_edge_accumulator_le__)
+
+    @LIB_BITSTREAM
     def test_python_reader(self):
-        from audiotools.decoders import BitstreamReader
+        from audiotools.bitstream import BitstreamReader
 
         #Vanilla, file-based BitstreamReader uses a 1 character buffer
         #and relies on stdio to perform buffering which is fast enough.
@@ -1734,6 +3160,7 @@ class Bitstream(unittest.TestCase):
                                           chr(0xED),
                                           chr(0x3B) +
                                           chr(0xC1)])
+
         def new_temp5():
             return __SimpleChunkReader__([chr(0xB1),
                                           chr(0xED),
@@ -1751,7 +3178,6 @@ class Bitstream(unittest.TestCase):
             self.assertEqual(bitstream.read(5), 7)
             self.assertEqual(bitstream.read(3), 5)
             self.assertEqual(bitstream.read(19), 342977)
-            self.assertEqual(bitstream.tell(), 4)
 
             bitstream = BitstreamReader(new_temp(), 0)
             self.assertEqual(bitstream.read64(2), 2)
@@ -1759,7 +3185,6 @@ class Bitstream(unittest.TestCase):
             self.assertEqual(bitstream.read64(5), 7)
             self.assertEqual(bitstream.read64(3), 5)
             self.assertEqual(bitstream.read64(19), 342977)
-            self.assertEqual(bitstream.tell(), 4)
 
             bitstream = BitstreamReader(new_temp(), 0)
             self.assertEqual(bitstream.read_signed(2), -2)
@@ -1767,7 +3192,6 @@ class Bitstream(unittest.TestCase):
             self.assertEqual(bitstream.read_signed(5), 7)
             self.assertEqual(bitstream.read_signed(3), -3)
             self.assertEqual(bitstream.read_signed(19), -181311)
-            self.assertEqual(bitstream.tell(), 4)
 
             bitstream = BitstreamReader(new_temp(), 0)
             self.assertEqual(bitstream.unary(0), 1)
@@ -1791,6 +3215,13 @@ class Bitstream(unittest.TestCase):
             bitstream.unread(bit)
             self.assertEqual(bitstream.read(2), 1)
             bitstream.byte_align()
+
+            bitstream = BitstreamReader(new_temp(), 0)
+            self.assertEqual(bitstream.read(8), 0xB1)
+            bitstream.unread(0)
+            self.assertEqual(bitstream.read(1), 0)
+            bitstream.unread(1)
+            self.assertEqual(bitstream.read(1), 1)
 
             bitstream = BitstreamReader(new_temp(), 0)
             self.assertEqual(bitstream.limited_unary(0, 2), 1)
@@ -1830,7 +3261,6 @@ class Bitstream(unittest.TestCase):
             self.assertEqual(bitstream.read(5), 13)
             self.assertEqual(bitstream.read(3), 3)
             self.assertEqual(bitstream.read(19), 395743)
-            self.assertEqual(bitstream.tell(), 4)
 
             bitstream = BitstreamReader(new_temp(), 1)
             self.assertEqual(bitstream.read64(2), 1)
@@ -1838,7 +3268,6 @@ class Bitstream(unittest.TestCase):
             self.assertEqual(bitstream.read64(5), 13)
             self.assertEqual(bitstream.read64(3), 3)
             self.assertEqual(bitstream.read64(19), 395743)
-            self.assertEqual(bitstream.tell(), 4)
 
             bitstream = BitstreamReader(new_temp(), 1)
             self.assertEqual(bitstream.read_signed(2), 1)
@@ -1846,7 +3275,6 @@ class Bitstream(unittest.TestCase):
             self.assertEqual(bitstream.read_signed(5), 13)
             self.assertEqual(bitstream.read_signed(3), 3)
             self.assertEqual(bitstream.read_signed(19), -128545)
-            self.assertEqual(bitstream.tell(), 4)
 
             bitstream = BitstreamReader(new_temp(), 1)
             self.assertEqual(bitstream.unary(0), 1)
@@ -1870,6 +3298,13 @@ class Bitstream(unittest.TestCase):
             bitstream.unread(bit)
             self.assertEqual(bitstream.read(4), 8)
             bitstream.byte_align()
+
+            bitstream = BitstreamReader(new_temp(), 1)
+            self.assertEqual(bitstream.read(8), 0xB1)
+            bitstream.unread(0)
+            self.assertEqual(bitstream.read(1), 0)
+            bitstream.unread(1)
+            self.assertEqual(bitstream.read(1), 1)
 
             bitstream = BitstreamReader(new_temp(), 1)
             self.assertEqual(bitstream.limited_unary(0, 2), 1)
@@ -1897,16 +3332,9 @@ class Bitstream(unittest.TestCase):
             self.assertEqual(bitstream.read(12), 0x3BE)
             bitstream.unmark()
 
-
-    @LIB_CORE
+    @LIB_BITSTREAM
     def test_simple_writer(self):
-        from audiotools.encoders import BitstreamWriter
-
-        self.assertRaises(TypeError, BitstreamWriter, None, 0)
-        self.assertRaises(TypeError, BitstreamWriter, 1, 0)
-        self.assertRaises(TypeError, BitstreamWriter, "foo", 0)
-        self.assertRaises(TypeError, BitstreamWriter,
-                          cStringIO.StringIO("foo"), 0)
+        from audiotools.bitstream import BitstreamWriter
 
         temp = tempfile.NamedTemporaryFile()
         try:
@@ -2097,52 +3525,181 @@ class Bitstream(unittest.TestCase):
 
     #and have the bitstream reader check those values are accurate
 
-    @LIB_CORE
-    def close_test(self):
-        from audiotools.decoders import BitstreamReader
+    @LIB_BITSTREAM
+    def test_reader_close(self):
+        from audiotools.bitstream import BitstreamReader, HuffmanTree
 
-        r1 = BitstreamReader(open("test.py", "rb"), False)
-        r1.read(8)
-        r1.close()
-        self.assertRaises(IOError,
-                          r1.read,
-                          8)
-        del(r1)
+        def test_reader(reader):
+            self.assertRaises(IOError, reader.read, 1)
+            self.assertRaises(IOError, reader.read64, 2)
+            self.assertRaises(IOError, reader.skip, 3)
+            self.assertRaises(IOError, reader.skip_bytes, 1)
+            self.assertRaises(IOError, reader.read_signed, 2)
+            self.assertRaises(IOError, reader.read_signed64, 3)
+            self.assertRaises(IOError, reader.unary, 1)
+            self.assertRaises(IOError, reader.limited_unary, 1, 2)
+            self.assertRaises(IOError, reader.read_bytes, 1)
+            self.assertRaises(IOError, reader.parse, "1b2b3b")
+            self.assertRaises(IOError, reader.substream, 2)
+            self.assertRaises(IOError, reader.read_huffman_code,
+                              HuffmanTree([(1, ),     1,
+                                           (0, 1),    2,
+                                           (0, 0, 1), 3,
+                                           (0, 0, 0), 4], False))
 
-        r1 = BitstreamReader(cStringIO.StringIO("abcd"), False)
-        r1.read(8)
-        r1.close()
-        self.assertRaises(IOError,
-                          r1.read,
-                          8)
-        del(r1)
+        def new_temp():
+            temp = cStringIO.StringIO()
+            temp.write(chr(0xB1))
+            temp.write(chr(0xED))
+            temp.write(chr(0x3B))
+            temp.write(chr(0xC1))
+            temp.seek(0, 0)
+            return temp
+
+        #test a BitstreamReader from a Python file object
+        f = open("test_core.py", "rb")
+
+        reader = BitstreamReader(f, 0)
+        reader.close()
+        test_reader(reader)
+        reader.set_endianness(1)
+        test_reader(reader)
+
+        reader = BitstreamReader(f, 1)
+        reader.close()
+        test_reader(reader)
+        reader.set_endianness(0)
+        test_reader(reader)
+
+        f.close()
+        del(f)
+
+        #test a BitstreamReader from a Python cStringIO object
+        reader = BitstreamReader(new_temp(), 0)
+        reader.close()
+        test_reader(reader)
+        reader.set_endianness(1)
+        test_reader(reader)
+
+        reader = BitstreamReader(new_temp(), 1)
+        reader.close()
+        test_reader(reader)
+        reader.set_endianness(0)
+        test_reader(reader)
+
+    @LIB_BITSTREAM
+    def test_writer_close(self):
+        from audiotools.bitstream import BitstreamWriter
+        from audiotools.bitstream import BitstreamRecorder
+        from audiotools.bitstream import BitstreamAccumulator
+
+        def test_writer(writer):
+            self.assertRaises(IOError, writer.write, 1, 1)
+            self.assertRaises(IOError, writer.write_signed, 2, 1)
+            self.assertRaises(IOError, writer.unary, 1, 1)
+            self.assertRaises(IOError, writer.write64, 1, 1)
+            self.assertRaises(IOError, writer.write_signed64, 2, 1)
+            self.assertRaises(IOError, writer.write_bytes, "foo")
+            self.assertRaises(IOError, writer.build, "1u2u3u", [0, 1, 2])
+
+        #test a BitstreamWriter to a Python file object
+        f = open("test.bin", "wb")
+        try:
+            writer = BitstreamWriter(f, 0)
+            writer.close()
+            test_writer(writer)
+            writer.set_endianness(1)
+            test_writer(writer)
+            f.close()
+            del(f)
+        finally:
+            os.unlink("test.bin")
+
+        f = open("test.bin", "wb")
+        try:
+            writer = BitstreamWriter(f, 1)
+            writer.close()
+            test_writer(writer)
+            writer.set_endianness(0)
+            test_writer(writer)
+            f.close()
+            del(f)
+        finally:
+            os.unlink("test.bin")
+
+        #test a BitstreamWriter to a Python cStringIO object
+        s = cStringIO.StringIO()
+        writer = BitstreamWriter(s, 0)
+        writer.close()
+        test_writer(writer)
+        writer.set_endianness(1)
+        test_writer(writer)
+        del(writer)
+        del(s)
+
+        s = cStringIO.StringIO()
+        writer = BitstreamWriter(s, 1)
+        writer.close()
+        test_writer(writer)
+        writer.set_endianness(0)
+        test_writer(writer)
+        del(writer)
+        del(s)
+
+        #test a BitstreamRecorder
+        writer = BitstreamRecorder(0)
+        writer.close()
+        test_writer(writer)
+        writer.set_endianness(1)
+        test_writer(writer)
+        del(writer)
+
+        writer = BitstreamRecorder(1)
+        writer.close()
+        test_writer(writer)
+        writer.set_endianness(0)
+        test_writer(writer)
+        del(writer)
+
+        #test a BitstreamAccumulator
+        writer = BitstreamAccumulator(0)
+        writer.close()
+        test_writer(writer)
+        writer.set_endianness(1)
+        test_writer(writer)
+        del(writer)
+
+        writer = BitstreamAccumulator(1)
+        writer.close()
+        test_writer(writer)
+        writer.set_endianness(0)
+        test_writer(writer)
+        del(writer)
 
 
 class TestReplayGain(unittest.TestCase):
-    @LIB_CORE
+    @LIB_REPLAYGAIN
     def test_basics(self):
         import audiotools.replaygain
         import audiotools.pcm
+        from cStringIO import StringIO
 
         #check for invalid sample rate
         self.assertRaises(ValueError,
                           audiotools.replaygain.ReplayGain,
                           200000)
 
-        #check for invalid channel count
+        #check for a very small sample count
         rg = audiotools.replaygain.ReplayGain(44100)
-        self.assertRaises(ValueError,
-                          rg.update,
-                          audiotools.pcm.from_list(range(20), 4, 16, True))
 
-        #check for not enough samples
-        rg.update(audiotools.pcm.from_list([1, 2], 2, 16, True))
-        self.assertRaises(ValueError, rg.title_gain)
+        self.assertEqual(
+            rg.title_gain(audiotools.PCMReader(StringIO(""),
+                                               44100, 2, 0x3, 16)),
+            (0.0, 0.0))
         self.assertRaises(ValueError, rg.album_gain)
 
         #check for no tracks
-        gain = audiotools.calculate_replay_gain([])
-        self.assertRaises(ValueError, list, gain)
+        assert(len(list(audiotools.calculate_replay_gain([]))) == 0)
 
         #check for lots of invalid combinations for calculate_replay_gain
         track_file1 = tempfile.NamedTemporaryFile(suffix=".wav")
@@ -2153,46 +3710,11 @@ class TestReplayGain(unittest.TestCase):
                                                    BLANK_PCM_Reader(2))
             track2 = audiotools.WaveAudio.from_pcm(track_file2.name,
                                                    BLANK_PCM_Reader(3))
-            track3 = audiotools.WaveAudio.from_pcm(
-                track_file3.name,
-                BLANK_PCM_Reader(2, sample_rate=48000))
+            track3 = audiotools.WaveAudio.from_pcm(track_file3.name,
+                                                   BLANK_PCM_Reader(2))
 
-            gain = audiotools.calculate_replay_gain([track1, track2, track3])
-            self.assertRaises(ValueError, list, gain)
-
-            track3 = audiotools.WaveAudio.from_pcm(
-                track_file3.name,
-                BLANK_PCM_Reader(
-                    2,
-                    channels=4,
-                    channel_mask=audiotools.ChannelMask.from_fields(
-                        front_left=True,
-                        front_right=True,
-                        back_left=True,
-                        back_right=True)))
-
-            gain = audiotools.calculate_replay_gain([track1, track2, track3])
-            self.assertRaises(ValueError, list, gain)
-
-            track3 = audiotools.WaveAudio.from_pcm(
-                track_file3.name,
-                BLANK_PCM_Reader(
-                    2,
-                    sample_rate=48000,
-                    channels=3,
-                    channel_mask=audiotools.ChannelMask.from_fields(
-                        front_left=True,
-                        front_right=True,
-                        front_center=True)))
-
-            gain = audiotools.calculate_replay_gain([track1, track2, track3])
-            self.assertRaises(ValueError, list, gain)
-
-            track3 = audiotools.WaveAudio.from_pcm(
-                track_file3.name,
-                BLANK_PCM_Reader(2))
-
-            gain = list(audiotools.calculate_replay_gain([track1, track2, track3]))
+            gain = list(audiotools.calculate_replay_gain(
+                    [track1, track2, track3]))
             self.assertEqual(len(gain), 3)
             self.assert_(gain[0][0] is track1)
             self.assert_(gain[1][0] is track2)
@@ -2202,7 +3724,7 @@ class TestReplayGain(unittest.TestCase):
             track_file2.close()
             track_file3.close()
 
-    @LIB_CORE
+    @LIB_REPLAYGAIN
     def test_valid_rates(self):
         import audiotools.replaygain
 
@@ -2215,12 +3737,48 @@ class TestReplayGain(unittest.TestCase):
                                               0x4,
                                               16,
                                               (30000, sample_rate / 100))
-            audiotools.transfer_data(reader.read, gain.update)
-            (gain, peak) = gain.title_gain()
+            (gain, peak) = gain.title_gain(reader)
             self.assert_(gain < -4.0)
             self.assert_(peak > .90)
 
-    @LIB_CORE
+    @LIB_REPLAYGAIN
+    def test_pcm(self):
+        import audiotools.replaygain
+
+        gain = audiotools.replaygain.ReplayGain(44100)
+        (gain, peak) = gain.title_gain(
+            test_streams.Sine16_Stereo(44100, 44100,
+                                       441.0, 0.50,
+                                       4410.0, 0.49, 1.0))
+
+        main_reader = test_streams.Sine16_Stereo(44100, 44100,
+                                       441.0, 0.50,
+                                       4410.0, 0.49, 1.0)
+
+        reader = audiotools.replaygain.ReplayGainReader(main_reader,
+                                                        gain,
+                                                        peak)
+
+        #read FrameLists from ReplayGainReader
+        f = reader.read(4096)
+        while (len(f) > 0):
+            f = reader.read(4096)
+
+        #ensure subsequent reads return empty FrameLists
+        for i in xrange(10):
+            self.assertEqual(len(reader.read(4096)), 0)
+
+        #ensure closing the ReplayGainReader raises ValueError
+        #on subsequent reads
+        reader.close()
+
+        self.assertRaises(ValueError, reader.read, 4096)
+
+        #ensure wrapped reader is also closed
+        self.assertRaises(ValueError, main_reader.read, 4096)
+
+
+    @LIB_REPLAYGAIN
     def test_reader(self):
         import audiotools.replaygain
 
@@ -2238,1854 +3796,24 @@ class TestReplayGain(unittest.TestCase):
 
             #calculate its ReplayGain
             gain = audiotools.replaygain.ReplayGain(track1.sample_rate())
-            pcm = track1.to_pcm()
-            audiotools.transfer_data(pcm.read, gain.update)
-            (gain, peak) = gain.title_gain()
+            (gain, peak) = gain.title_gain(track1.to_pcm())
 
             #apply gain to dummy file
             track2 = test_format.from_pcm(
                 dummy2.name,
-                audiotools.ReplayGainReader(track1.to_pcm(),
-                                            gain,
-                                            peak))
+                audiotools.replaygain.ReplayGainReader(track1.to_pcm(),
+                                                       gain,
+                                                       peak))
 
             #ensure gain applied is quieter than without gain applied
             gain2 = audiotools.replaygain.ReplayGain(track1.sample_rate())
-            pcm = track2.to_pcm()
-            audiotools.transfer_data(pcm.read, gain2.update)
-            (gain2, peak2) = gain2.title_gain()
+            (gain2, peak2) = gain2.title_gain(track2.to_pcm())
 
             self.assert_(gain2 > gain)
         finally:
             dummy1.close()
             dummy2.close()
 
-    @LIB_CORE
-    def test_applicable(self):
-        #build a bunch of test tracks
-        test_format = audiotools.WaveAudio
-
-        temp_files = [tempfile.NamedTemporaryFile(
-                suffix="." + test_format.SUFFIX)
-                      for i in xrange(6)]
-
-        try:
-            track1 = test_format.from_pcm(temp_files[0].name,
-                                          BLANK_PCM_Reader(1, 44100, 2, 16))
-
-            track2 = test_format.from_pcm(temp_files[1].name,
-                                          BLANK_PCM_Reader(2, 44100, 2, 16))
-
-            track3 = test_format.from_pcm(temp_files[2].name,
-                                          BLANK_PCM_Reader(3, 48000, 2, 16))
-
-            track4 = test_format.from_pcm(temp_files[3].name,
-                                          BLANK_PCM_Reader(4, 44100, 1, 16))
-
-            track5 = test_format.from_pcm(temp_files[4].name,
-                                          BLANK_PCM_Reader(5, 44100, 2, 24))
-
-            track6 = test_format.from_pcm(temp_files[5].name,
-                                          BLANK_PCM_Reader(6, 44100, 2, 16))
-
-
-            #inconsistent sample rates aren't applicable
-            self.assertEqual(audiotools.applicable_replay_gain([track1,
-                                                                track2,
-                                                                track3]),
-                             False)
-
-            #inconsistent channel counts aren't applicable
-            self.assertEqual(audiotools.applicable_replay_gain([track1,
-                                                                track2,
-                                                                track4]),
-                             False)
-
-            #inconsistent bit-per-sample *are* applicable
-            self.assertEqual(audiotools.applicable_replay_gain([track1,
-                                                                track2,
-                                                                track5]),
-                             True)
-
-            #consistent everything is applicable
-            self.assertEqual(audiotools.applicable_replay_gain([track1,
-                                                                track2,
-                                                                track6]),
-                             True)
-
-        finally:
-            for f in temp_files:
-                f.close()
-
-
-class TestXMCD(unittest.TestCase):
-    XMCD_FILES = [(
-"""eJyFk0tv20YQgO8B8h+m8MHJReXyTQFEm0pyYcAvSELTHCmKigRLYiHSanUTSdt1agd9BGnsOo3R
-uGmcNn60AYrakfNjsqVinfwXOpS0KwRtEQKL2Zmd/WZ2ZjgFXzTs8tUrU5CsYsuyl6HSshoOuJWK
-5/heOrEnH1EEthWJIClMkUVFJVwxVFFiiiIagswU1dAFlSmGomg6BxNd0TmbSBoaJpquEW2Sgqqo
-ItdUQyCcT3RNV3kAYojKJBFREGRDm2gKmaQvipqs83uiLKmGwTVVJTqPJxqSYHBNEiRR4xEkkWij
-KiQrW/NsqDvN2341DbKk8IO80655NbeJ1kRdarm243lOGUqdNNjlcqkMbZJSUuLSnAAZ97NOq3a7
-6sM1+zoUfKftQMGuOq0KOD5Y9VSCKKyUGjXfR0S7ZqXhI7e5nGvaCUVIqaOw2dlCZjZrygoRKmWC
-xmxxtjiXM2n0iIbHNDqk4elMfnGhOJvLw/vwlhkWafSygKuIS4L4YJsGezR49Xqne9l7ie9cJpe9
-c0Teyt3Im1hn7Fz249xCPmcW3JVm2U8G6uqV4jCigCE3aPSMhj/T8DGNXtDwJFGjHvMg5s2q5cN0
-yV3xodEBz7daH8CHM26r4TIf0UwuIyJ6zEwSgruMOgRHd2D4iOc0+gbfcXn+KP79fv/hbrz2PH74
-HQ1+o8Ev7LZs3nTqtosjX3RhvgMzVjNTXylNe7CQVP895qeY8clq/85mfPb09fZ6fHcjfrX19+mP
-/Z0w6zanfSg5ULd8h7mr//UWdqiZwxdgovdpuE+jTRqt4wamNOahm7S7dfHnGuLfPDsb7B/HZw+G
-9e+u0e5dyMzT8HxUQriWt5rLFnzitJLZus4Ihtnf3ht8f2+wv3vx0xYvsWC+eRrQ4Cg+79EAS/Tt
-MJNDGkXYHe5FTBoc0uBe/8GTi4NtbsbiJ7li2L+wbbiBObfteNBxV6DjWFVeLCKZ8dGX8dFOvLYa
-9/YuNk75iWwW5gvxydeDH77CNPqHW9gdGoRJSsl4HdPwYJjSr6Mh4feUSeNhMZVJ8QN1coCowYsn
-iKLBHzQ44C6a2V/dxRGmAcbEd29g/2mwipNMgx0abHJH/V2jxD2Nt6JiqYY8DLyOvwha+LwK/9tr
-+LzmV5PxaLu2Vff4DfKuKv/rYu7TYtaE5CdMw+gvREtRMEeSjKU4ltJYymOpjKU6ltpY6mNpMA4H
-MiJhSMKYhEEJoxKGJYxLGJgwssjIYkJemrtxazGfzeVx/w8vFHIR""".decode('base64').decode('zlib'),
-                   4351, [150, 21035, 42561, 49623, 52904, 69806, 95578,
-                         118580, 137118, 138717, 156562, 169014, 187866,
-                         192523, 200497, 205135, 227486, 243699, 266182,
-                         293092, 303273, 321761],
-                   [('EXTT0', u''),
-                    ('EXTT1', u''),
-                    ('EXTT2', u''),
-                    ('EXTT3', u''),
-                    ('EXTT4', u''),
-                    ('EXTT5', u''),
-                    ('EXTT6', u''),
-                    ('EXTT7', u''),
-                    ('EXTT8', u''),
-                    ('EXTT9', u''),
-                    ('DTITLE', u'\u30de\u30af\u30ed\u30b9FRONTIER / \u30de\u30af\u30ed\u30b9F O\u30fbS\u30fbT\u30fb3 \u5a18\u305f\u307e\u2640\uff3bDisk1\uff3d'),
-                    ('EXTT19', u''),
-                    ('DYEAR', u'2008'),
-                    ('DISCID', u'4510fd16'),
-                    ('TTITLE20', u'\u30a4\u30f3\u30d5\u30a3\u30cb\u30c6\u30a3 #7 without vocals'),
-                    ('TTITLE21', u'\u30cb\u30f3\u30b8\u30fc\u30f3 Loves you yeah! without vocals'),
-                    ('EXTT18', u''),
-                    ('EXTD', u' YEAR: 2008'),
-                    ('EXTT12', u''),
-                    ('EXTT13', u''),
-                    ('EXTT10', u''),
-                    ('DGENRE', u'Soundtrack'),
-                    ('EXTT16', u''),
-                    ('EXTT17', u''),
-                    ('EXTT14', u''),
-                    ('EXTT15', u''),
-                    ('EXTT20', u''),
-                    ('TTITLE9', u'\u661f\u9593\u98db\u884c'),
-                    ('TTITLE8', u'\u300c\u8d85\u6642\u7a7a\u98ef\u5e97 \u5a18\u3005\u300d CM\u30bd\u30f3\u30b0 (Ranka Version)'),
-                    ('TTITLE5', u"\u5c04\u624b\u5ea7\u2606\u5348\u5f8c\u4e5d\u6642Don't be late"),
-                    ('TTITLE4', u"Welcome To My FanClub's Night!"),
-                    ('TTITLE7', u'\u30a4\u30f3\u30d5\u30a3\u30cb\u30c6\u30a3 #7'),
-                    ('TTITLE6', u"What 'bout my star?"),
-                    ('TTITLE1', u"What 'bout my star? @Formo"),
-                    ('TTITLE0', u'\u30c8\u30e9\u30a4\u30a2\u30f3\u30b0\u30e9\u30fc'),
-                    ('TTITLE3', u'\u30c0\u30a4\u30a2\u30e2\u30f3\u30c9 \u30af\u30ec\u30d0\u30b9\uff5e\u5c55\u671b\u516c\u5712\u306b\u3066'),
-                    ('TTITLE2', u'\u30a2\u30a4\u30e2'),
-                    ('TTITLE19', u'\u30a2\u30a4\u30e2\uff5e\u3053\u3044\u306e\u3046\u305f\uff5e'),
-                    ('TTITLE18', u'\u30c0\u30a4\u30a2\u30e2\u30f3\u30c9 \u30af\u30ec\u30d0\u30b9'),
-                    ('EXTT21', u''),
-                    ('EXTT11', u''),
-                    ('TTITLE11', u'\u306d\u3053\u65e5\u8a18'),
-                    ('TTITLE10', u'\u79c1\u306e\u5f7c\u306f\u30d1\u30a4\u30ed\u30c3\u30c8'),
-                    ('TTITLE13', u'\u5b87\u5b99\u5144\u5f1f\u8239'),
-                    ('TTITLE12', u'\u30cb\u30f3\u30b8\u30fc\u30f3 Loves you yeah!'),
-                    ('TTITLE15', u'\u30a2\u30a4\u30e2 O.C.'),
-                    ('TTITLE14', u'SMS\u5c0f\u968a\u306e\u6b4c\uff5e\u3042\u306e\u5a18\u306f\u30a8\u30a4\u30ea\u30a2\u30f3'),
-                    ('TTITLE17', u'\u611b\u30fb\u304a\u307c\u3048\u3066\u3044\u307e\u3059\u304b'),
-                    ('TTITLE16', u'\u30a2\u30a4\u30e2\uff5e\u9ce5\u306e\u3072\u3068'),
-                    ('PLAYORDER', u'')],
-                    [12280380, 12657288, 4152456, 1929228, 9938376, 15153936,
-                     13525176, 10900344, 940212, 10492860, 7321776, 11084976,
-                     2738316, 4688712, 2727144, 13142388, 9533244, 13220004,
-                     15823080, 5986428, 10870944, 2687748]),
-                  (
-"""eJxNU9uOo0gMfZ6W+h8szcuM1OqhuBOpHpImnYnUlyhh5/JYASeUGqhMQbKTv19XcclKSDb28bF9
-MJ/hb50X8JRCITqxFy3CQVZ4f/eZHsi0yD/goEWNoA6HFrt2RvFPLHCs8SOPGcdjLIqM48euHxgn
-dJwkMU4Uu7F1Et/pMYw5SdjXu4Hj9DEv9qKwpw69yLde5Dpxn018P7RZl7HYtbWuG/mxbeX6bhTb
-CjcMWRhbL46ixOI8h7k9s+fSTGzYLJVtDhU2x66cge8HAbSYq6Zoh/wWL7KVqpmBYYGNVjm2LRaw
-v84gL4p9ARf2GDy6mxcHntTpquWx7OBL/hV2HV4QdnmJ+gDYgageDcXuvK9l1xHFRYoZKY5/gRj6
-gdL17mmdcpf2CwNGy6TZOntZ8vcG/zkR47mQqoVv8AsbdUShW3gx/Qj3eznfctqMpEhXy7ftkq/o
-a93fZZbA4RuNtWpkR7uMQcZXWpSHB5q7+XNGrTR9XEiF/mhoxxHl8sw2olRX0j4dvTzAd4p1U3CD
-6lRNzTz+LDTM/xVXo1ct2ynj89cr/JBVJY4I6xbezvUeNdB2IyLguxIvonuwvD9lU4Bs4UlUlWyO
-IyjkO3qjZ+y/wqareviIiYhIkMzawAxmebTwVKOop+Vioyz8LBUshMYWnkVzbGHewUpNTAlfmIMw
-xTsUIGikZ6mniZlDneTJpivEkwVsSWx925sxvtDqAxt4lZp0nuIu7+e5qavVbU/m8YyCi+qM5he8
-YIW3Up+/550y8r2iroWc5mWBrcqIuD1rs53MS5KwaVQHC9ND0cFP6JD/IHXxSjgk9P9lXyh9w0V0
-UJS0etojANlY9Ju9+N3HdYLGdoB5dSp7ud5rPIopm/B10ylY0rdpRNWLdn+3/JWlHMwVz6A/Y4pk
-Du8tG6w7WG+w/mCDwYaDjQYbDzYZeSbCkZGNlGzkZCMpG1nZSMtGXjYSM8O8eZn/ft+myy35/wHM
-D3PD""".decode('base64').decode('zlib'),
-                   4455, [150, 14731, 31177, 48245, 60099, 78289, 94077,
-                          110960, 125007, 138376, 156374, 172087, 194466,
-                          211820, 227485, 242784, 266168, 287790, 301276,
-                          320091],
-                   [('EXTT0', u''), ('EXTT1', u''), ('EXTT2', u''),
-                    ('EXTT3', u''), ('EXTT4', u''), ('EXTT5', u''),
-                    ('EXTT6', u''), ('EXTT7', u''), ('EXTT8', u''),
-                    ('EXTT9', u''),
-                    ('DTITLE', u'OneUp Studios / Xenogears Light'),
-                    ('EXTT19', u''), ('DYEAR', u'2005'),
-                    ('DISCID', u'22116514'), ('EXTT18', u''),
-                    ('EXTD', u' YEAR: 2005'), ('EXTT12', u''),
-                    ('EXTT13', u''), ('EXTT10', u''), ('DGENRE', u'Game'),
-                    ('EXTT16', u''), ('EXTT17', u''), ('EXTT14', u''),
-                    ('EXTT15', u''),
-                    ('TTITLE9', u'Bonds of Sea and Fire'),
-                    ('TTITLE8', u'One Who Bares Fangs At God'),
-                    ('TTITLE5', u'Shevat, the Wind is Calling'),
-                    ('TTITLE4', u'My Village Is Number One'),
-                    ('TTITLE7', u'Shattering the Egg of Dreams'),
-                    ('TTITLE6', u'Singing of the Gentle Wind'),
-                    ('TTITLE1', u'Grahf, Conqueror of Darkness'),
-                    ('TTITLE0', u'Premonition'),
-                    ('TTITLE3', u'Far Away Promise'),
-                    ('TTITLE2', u'Tears of the Stars, Hearts of the People'),
-                    ('TTITLE19', u'Into Eternal Sleep'),
-                    ('TTITLE18', u'The Alpha and Omega'),
-                    ('EXTT11', u''),
-                    ('TTITLE11', u'Broken Mirror'),
-                    ('TTITLE10', u'Ship of Sleep and Remorse'),
-                    ('TTITLE13', u'The Blue Traveler'),
-                    ('TTITLE12', u'Dreams of the Strong'),
-                    ('TTITLE15', u'The Treasure Which Cannot Be Stolen'),
-                    ('TTITLE14', u'October Mermaid'),
-                    ('TTITLE17', u'Gathering Stars in the Night Sky'),
-                    ('TTITLE16', u'Valley Where the Wind is Born'),
-                    ('PLAYORDER', u'')],
-                   [8573628, 9670248, 10035984, 6970152, 10695720, 9283344,
-                    9927204, 8259636, 7860972, 10582824, 9239244, 13158852,
-                    10204152, 9211020, 8995812, 13749792, 12713736, 7929768,
-                    11063220, 8289036]),
-                  (
-"""eJxdUU1v00AQvVfqf5iqF5BoajuO7UTag5OY1lI+KtsN5OjYm8ZKYke2k5JLhW3EoYA4gjiAxNeh
-iCKEQCAi8WMWqt76F1i3touwbL95s2/fzsxuwr2pZa+vbUL6Gb5pjWHom1MM3nAY4DCopfn0YStM
-EVbLjJgTnpWqBRGYKlPOiSjxbEHoFqFaGDBVSbxmnMALUsF4XhAKQ1bgK9f2rChy/5YhsqKU1950
-Agsm2D0IRzXgJKlY0PDCCRzPpdmU7vmehYMA2zBY1sCy7YENC7ZUKXF7LQYa3mzpOwejEG5YN0EP
-8QKDbo2wPwQcgjkppRb6fDB1wpBaLByzBnXPHSuulbowpezYpqo31CYyJWbAC4xFE4ZqtBTUM33H
-mwcg+6EThAFsQ32CTWsExghDHQchNJpU3FdkDXEMI9B4R+loCpJdZ4rX14xLGwZ1Nbmzo8DVfxsu
-VsdHJH5N4h8k/kWSk8vg01GuZ5HmYBjOqbLlDDE4AcUxBpPWboa5ikO73bYCbbmpwJ/Tb2fPnlI9
-ib+S5AuJP5LkHUlWF6uIvvmOMtrvKdqh509sKm1uhdhyvfSEXMAjkrxP9yfHqVf0k0QPSfTk7Pmr
-XFFB+tjzZuC5oHtTPPDsJVWOzNlsOcPebFJYCWhX3dkF07WhTQOjD41uq6tR8e/v989XJyQ6PT/+
-nKtF1N9X03bV20qek5A+d3V6jfqhE4zSepKXJH5Lkhe0MTqxXFdFdUU2oKHt63QUmk6VRreTnnnr
-PyzmyyASPaCNkTimdZDoMYkekTjteVfuyHW1ELIovaD4A0kikryh6+1uT+1sbKyvKXeNJtJ7dxpb
-Is+xl9xg0BWyGXIZljPkM6xkKGQoZihlWM19CsPUca8l97sa7ZDGfwEBGThn""".decode('base64').decode('zlib'),
-                   2888, [150, 19307, 41897, 60903, 78413, 93069, 109879,
-                          126468, 144667, 164597, 177250, 197178],
-                   [('EXTT0', u''), ('EXTT1', u''), ('EXTT2', u''),
-                    ('EXTT3', u''), ('EXTT4', u''), ('EXTT5', u''),
-                    ('EXTT6', u''), ('EXTT7', u''), ('EXTT8', u''),
-                    ('EXTT9', u''),
-                    ('DTITLE', u'Various Artists / Bleach The Best CD'),
-                    ('DYEAR', u'2006'), ('DISCID', u'a80b460c'),
-                    ('EXTD', u'SVWC-7421'), ('EXTT10', u''),
-                    ('DGENRE', u'Anime'),
-                    ('TTITLE9', u'BEAT CRUSADERS / TONIGHT,TONIGHT,TONIGHT'),
-                    ('TTITLE8', u'SunSet Swish / \u30de\u30a4\u30da\u30fc\u30b9'),
-                    ('TTITLE5', u'Skoop on Somebody / happypeople'),
-                    ('TTITLE4', u'\u30e6\u30f3\u30ca / \u307b\u3046\u304d\u661f'),
-                    ('TTITLE7', u'YUI / LIFE'),
-                    ('TTITLE6', u'HIGH and MIGHTY COLOR / \u4e00\u8f2a\u306e\u82b1'),
-                    ('TTITLE1', u'Rie fu / Life is Like a Boat'),
-                    ('TTITLE0', u'ORANGE RANGE / \uff0a~\u30a2\u30b9\u30bf\u30ea\u30b9\u30af~'),
-                    ('TTITLE3', u'UVERworld / D-tecnoLife'),
-                    ('TTITLE2', u'HOME MADE \u5bb6\u65cf / \u30b5\u30f3\u30ad\u30e5\u30fc\uff01\uff01'),
-                    ('EXTT11', u''),
-                    ('TTITLE11', u'\u30bf\u30ab\u30c1\u30e3 / MOVIN!!'),
-                    ('TTITLE10', u'\u3044\u304d\u3082\u306e\u304c\u304b\u308a / HANABI'),
-                    ('PLAYORDER', u'')],
-                   [11264316, 13282920, 11175528, 10295880, 8617728, 9884280,
-                    9754332, 10701012, 11718840, 7439964, 11717664, 11446596])]
-
-    @LIB_CORE
-    def testroundtrip(self):
-        for (data, length, offsets, items, track_lengths) in self.XMCD_FILES:
-            f = tempfile.NamedTemporaryFile(suffix=".xmcd")
-            try:
-                f.write(data)
-                f.flush()
-                f.seek(0, 0)
-
-                #check that reading in an XMCD file matches
-                #its expected values
-                xmcd = audiotools.XMCD.from_string(f.read())
-                # self.assertEqual(length, xmcd.length)
-                # self.assertEqual(offsets, xmcd.offsets)
-                for (pair1, pair2) in zip(sorted(items),
-                                          sorted(xmcd.fields.items())):
-                    self.assertEqual(pair1, pair2)
-                #self.assertEqual(dict(items),dict(xmcd.items()))
-
-                #check that building an XMCD file from values
-                #and reading it back in results in the same values
-                f2 = tempfile.NamedTemporaryFile(suffix=".xmcd")
-                try:
-                    f2.write(xmcd.to_string())
-                    f2.flush()
-                    f2.seek(0, 0)
-
-                    xmcd2 = audiotools.XMCD.from_string(f2.read())
-                    # self.assertEqual(length, xmcd2.length)
-                    # self.assertEqual(offsets, xmcd2.offsets)
-                    for (pair1, pair2) in zip(sorted(items),
-                                              sorted(xmcd2.fields.items())):
-                        self.assertEqual(pair1, pair2)
-                    # self.assertEqual(xmcd.length, xmcd2.length)
-                    # self.assertEqual(xmcd.offsets, xmcd2.offsets)
-                    self.assertEqual(dict(xmcd.fields.items()),
-                                     dict(xmcd2.fields.items()))
-                finally:
-                    f2.close()
-            finally:
-                f.close()
-
-    @LIB_CORE
-    def testtracktagging(self):
-        for (data, length, offsets, items, track_lengths) in self.XMCD_FILES:
-            f = tempfile.NamedTemporaryFile(suffix=".xmcd")
-            try:
-                f.write(data)
-                f.flush()
-                f.seek(0, 0)
-
-                xmcd = audiotools.XMCD.from_string(f.read())
-
-                #build a bunch of temporary FLAC files from the track_lengths
-                temp_files = [tempfile.NamedTemporaryFile(suffix=".flac")
-                              for track_length in track_lengths]
-                try:
-                    temp_tracks = [audiotools.FlacAudio.from_pcm(
-                            temp_file.name,
-                            EXACT_BLANK_PCM_Reader(track_length),
-                            "1")
-                                   for (track_length, temp_file) in
-                                   zip(track_lengths, temp_files)]
-
-                    for i in xrange(len(track_lengths)):
-                        temp_tracks[i].set_metadata(
-                            audiotools.MetaData(track_number=i + 1))
-
-                    #tag them with metadata from XMCD
-                    for track in temp_tracks:
-                        track.set_metadata(xmcd.track_metadata(
-                                track.track_number()))
-
-                    #build a new XMCD file from track metadata
-                    xmcd2 = audiotools.XMCD.from_tracks(temp_tracks)
-
-                    #check that the original XMCD values match the track ones
-                    # self.assertEqual(xmcd.length, xmcd2.length)
-                    # self.assertEqual(xmcd.offsets, xmcd2.offsets)
-                    self.assertEqual(xmcd.fields['DISCID'],
-                                     xmcd2.fields['DISCID'])
-                    if (len([pair for pair in xmcd.fields.items()
-                             if (pair[0].startswith('TTITLE') and
-                                 (u" / " in pair[1]))]) > 0):
-                        self.assertEqual(
-                            xmcd.fields['DTITLE'].split(' / ', 1)[1],
-                            xmcd2.fields['DTITLE'].split(' / ', 1)[1])
-                    else:
-                        self.assertEqual(xmcd.fields['DTITLE'],
-                                         xmcd2.fields['DTITLE'])
-                    self.assertEqual(xmcd.fields['DYEAR'],
-                                     xmcd2.fields['DYEAR'])
-                    for (pair1, pair2) in zip(
-                        sorted([pair for pair in xmcd.fields.items()
-                                if (pair[0].startswith('TTITLE'))]),
-                        sorted([pair for pair in xmcd2.fields.items()
-                                if (pair[0].startswith('TTITLE'))])):
-                        self.assertEqual(pair1, pair2)
-                finally:
-                    for t in temp_files:
-                        t.close()
-            finally:
-                f.close()
-
-    @LIB_CORE
-    def test_formatting(self):
-        LENGTH = 1134
-        OFFSETS = [150, 18740, 40778, 44676, 63267]
-
-        #ensure that latin-1 and UTF-8 encodings are handled properly
-        for (encoding, data) in zip(["ISO-8859-1", "UTF-8", "UTF-8"],
-                                   [{"TTITLE0":u"track one",
-                                     "TTITLE1":u"track two",
-                                     "TTITLE2":u"track three",
-                                     "TTITLE4":u"track four",
-                                     "TTITLE5":u"track five"},
-                                    {"TTITLE0":u"track \xf3ne",
-                                     "TTITLE1":u"track two",
-                                     "TTITLE2":u"track three",
-                                     "TTITLE4":u"track four",
-                                     "TTITLE5":u"track five"},
-                                    {"TTITLE0":u'\u30de\u30af\u30ed\u30b9',
-                                     "TTITLE1":u"track tw\xf3",
-                                     "TTITLE2":u"track three",
-                                     "TTITLE4":u"track four",
-                                     "TTITLE5":u"track five"}]):
-            # xmcd = audiotools.XMCD(data, OFFSETS, LENGTH)
-            xmcd = audiotools.XMCD(data, [u"# xmcd"])
-            xmcd2 = audiotools.XMCD.from_string(xmcd.to_string())
-            self.assertEqual(dict(xmcd.fields.items()),
-                             dict(xmcd2.fields.items()))
-
-            xmcdfile = tempfile.NamedTemporaryFile(suffix='.xmcd')
-            try:
-                xmcdfile.write(xmcd.to_string())
-                xmcdfile.flush()
-                xmcdfile.seek(0, 0)
-                xmcd2 = audiotools.XMCD.from_string(xmcdfile.read())
-                self.assertEqual(dict(xmcd.fields.items()),
-                                 dict(xmcd2.fields.items()))
-            finally:
-                xmcdfile.close()
-
-        #ensure that excessively long XMCD lines are wrapped properly
-        xmcd = audiotools.XMCD({"TTITLE0": u"l" + (u"o" * 512) + u"ng title",
-                                "TTITLE1": u"track two",
-                                "TTITLE2": u"track three",
-                                "TTITLE4": u"track four",
-                                "TTITLE5": u"track five"},
-                               [u"# xmcd"])
-        xmcd2 = audiotools.XMCD.from_string(xmcd.to_string())
-        self.assertEqual(dict(xmcd.fields.items()),
-                         dict(xmcd2.fields.items()))
-        self.assert_(max(map(len,
-                             cStringIO.StringIO(xmcd.to_string()).readlines())) < 80)
-
-        #ensure that UTF-8 multi-byte characters aren't split
-        xmcd = audiotools.XMCD({"TTITLE0": u'\u30de\u30af\u30ed\u30b9' * 100,
-                                "TTITLE1": u"a" + (u'\u30de\u30af\u30ed\u30b9' * 100),
-                                "TTITLE2": u"ab" + (u'\u30de\u30af\u30ed\u30b9' * 100),
-                                "TTITLE4": u"abc" + (u'\u30de\u30af\u30ed\u30b9' * 100),
-                                "TTITLE5": u"track tw\xf3"},
-                               [u"# xmcd"])
-
-        xmcd2 = audiotools.XMCD.from_string(xmcd.to_string())
-        self.assertEqual(dict(xmcd.fields.items()),
-                         dict(xmcd2.fields.items()))
-        self.assert_(max(map(len, cStringIO.StringIO(xmcd.to_string()))) < 80)
-
-    @LIB_CORE
-    def test_attrs(self):
-        for (xmcd_data, attrs) in zip(
-            self.XMCD_FILES,
-            [{"album_name": u"\u30de\u30af\u30ed\u30b9F O\u30fbS\u30fbT\u30fb3 \u5a18\u305f\u307e\u2640\uff3bDisk1\uff3d",
-              "artist_name": u"\u30de\u30af\u30ed\u30b9FRONTIER",
-              "year": u"2008",
-              "extra": u" YEAR: 2008"},
-             {"album_name": u"Xenogears Light",
-              "artist_name": u"OneUp Studios",
-              "year": u"2005",
-              "extra": u" YEAR: 2005"},
-             {"album_name": u"Bleach The Best CD",
-              "artist_name": u"Various Artists",
-              "year": u"2006",
-              "extra": u"SVWC-7421"}]):
-            xmcd_file = audiotools.XMCD.from_string(xmcd_data[0])
-
-            #first, check that attributes are retrieved properly
-            for key in attrs.keys():
-                self.assertEqual(getattr(xmcd_file, key),
-                                 attrs[key])
-
-        #then, check that setting attributes round-trip properly
-        for xmcd_data in self.XMCD_FILES:
-            for (attr, new_value) in [
-                ("album_name", u"New Album"),
-                ("artist_name", u"T\u00e9st N\u00e0me"),
-                ("year", u"2010"),
-                ("extra", u"Extra!" * 200)]:
-                xmcd_file = audiotools.XMCD.from_string(xmcd_data[0])
-                setattr(xmcd_file, attr, new_value)
-                self.assertEqual(getattr(xmcd_file, attr), new_value)
-
-        #finally, check that the file with set attributes
-        #round-trips properly
-        for xmcd_data in self.XMCD_FILES:
-            for (attr, new_value) in [
-                ("album_name", u"New Album" * 8),
-                ("artist_name", u"T\u00e9st N\u00e0me" * 8),
-                ("year", u"2010"),
-                ("extra", u"Extra!" * 200)]:
-                xmcd_file = audiotools.XMCD.from_string(xmcd_data[0])
-                setattr(xmcd_file, attr, new_value)
-                xmcd_file2 = audiotools.XMCD.from_string(
-                    xmcd_file.to_string())
-                self.assertEqual(getattr(xmcd_file2, attr), new_value)
-                self.assertEqual(getattr(xmcd_file, attr),
-                                 getattr(xmcd_file2, attr))
-
-    @LIB_CORE
-    def test_tracks(self):
-        for (xmcd_data, tracks) in zip(
-            self.XMCD_FILES,
-            [[(u'\u30c8\u30e9\u30a4\u30a2\u30f3\u30b0\u30e9\u30fc',
-               u'', u''),
-              (u"What 'bout my star? @Formo",
-               u'', u''),
-              (u'\u30a2\u30a4\u30e2',
-               u'', u''),
-              (u'\u30c0\u30a4\u30a2\u30e2\u30f3\u30c9 \u30af\u30ec\u30d0\u30b9\uff5e\u5c55\u671b\u516c\u5712\u306b\u3066',
-               u'', u''),
-              (u"Welcome To My FanClub's Night!",
-               u'', u''),
-              (u"\u5c04\u624b\u5ea7\u2606\u5348\u5f8c\u4e5d\u6642Don't be late",
-               u'', u''),
-              (u"What 'bout my star?",
-               u'', u''),
-              (u'\u30a4\u30f3\u30d5\u30a3\u30cb\u30c6\u30a3 #7',
-               u'', u''),
-              (u'\u300c\u8d85\u6642\u7a7a\u98ef\u5e97 \u5a18\u3005\u300d CM\u30bd\u30f3\u30b0 (Ranka Version)',
-               u'', u''),
-              (u'\u661f\u9593\u98db\u884c',
-               u'', u''),
-              (u'\u79c1\u306e\u5f7c\u306f\u30d1\u30a4\u30ed\u30c3\u30c8',
-               u'', u''),
-              (u'\u306d\u3053\u65e5\u8a18',
-               u'', u''),
-              (u'\u30cb\u30f3\u30b8\u30fc\u30f3 Loves you yeah!',
-               u'', u''),
-              (u'\u5b87\u5b99\u5144\u5f1f\u8239',
-               u'', u''),
-              (u'SMS\u5c0f\u968a\u306e\u6b4c\uff5e\u3042\u306e\u5a18\u306f\u30a8\u30a4\u30ea\u30a2\u30f3',
-               u'', u''),
-              (u'\u30a2\u30a4\u30e2 O.C.',
-               u'', u''),
-              (u'\u30a2\u30a4\u30e2\uff5e\u9ce5\u306e\u3072\u3068',
-               u'', u''),
-              (u'\u611b\u30fb\u304a\u307c\u3048\u3066\u3044\u307e\u3059\u304b',
-               u'', u''),
-              (u'\u30c0\u30a4\u30a2\u30e2\u30f3\u30c9 \u30af\u30ec\u30d0\u30b9',
-               u'', u''),
-              (u'\u30a2\u30a4\u30e2\uff5e\u3053\u3044\u306e\u3046\u305f\uff5e',
-               u'', u''),
-              (u'\u30a4\u30f3\u30d5\u30a3\u30cb\u30c6\u30a3 #7 without vocals',
-               u'', u''),
-              (u'\u30cb\u30f3\u30b8\u30fc\u30f3 Loves you yeah! without vocals',
-               u'', u'')],
-             [(u'Premonition', u'', u''),
-              (u'Grahf, Conqueror of Darkness', u'', u''),
-              (u'Tears of the Stars, Hearts of the People',
-               u'', u''),
-              (u'Far Away Promise', u'', u''),
-              (u'My Village Is Number One', u'', u''),
-              (u'Shevat, the Wind is Calling', u'', u''),
-              (u'Singing of the Gentle Wind', u'', u''),
-              (u'Shattering the Egg of Dreams', u'', u''),
-              (u'One Who Bares Fangs At God', u'', u''),
-              (u'Bonds of Sea and Fire', u'', u''),
-              (u'Ship of Sleep and Remorse', u'', u''),
-              (u'Broken Mirror', u'', u''),
-              (u'Dreams of the Strong', u'', u''),
-              (u'The Blue Traveler', u'', u''),
-              (u'October Mermaid', u'', u''),
-              (u'The Treasure Which Cannot Be Stolen', u'', u''),
-              (u'Valley Where the Wind is Born', u'', u''),
-              (u'Gathering Stars in the Night Sky', u'', u''),
-              (u'The Alpha and Omega', u'', u''),
-              (u'Into Eternal Sleep', u'', u'')],
-             [(u'\uff0a~\u30a2\u30b9\u30bf\u30ea\u30b9\u30af~',
-               u'ORANGE RANGE', u''),
-              (u'Life is Like a Boat', u'Rie fu', u''),
-              (u'\u30b5\u30f3\u30ad\u30e5\u30fc\uff01\uff01',
-               u'HOME MADE \u5bb6\u65cf', u''),
-              (u'D-tecnoLife', u'UVERworld', u''),
-              (u'\u307b\u3046\u304d\u661f', u'\u30e6\u30f3\u30ca', u''),
-              (u'happypeople', u'Skoop on Somebody', u''),
-              (u'\u4e00\u8f2a\u306e\u82b1', u'HIGH and MIGHTY COLOR', u''),
-              (u'LIFE', u'YUI', u''),
-              (u'\u30de\u30a4\u30da\u30fc\u30b9', u'SunSet Swish', u''),
-              (u'TONIGHT,TONIGHT,TONIGHT', u'BEAT CRUSADERS', u''),
-              (u'HANABI', u'\u3044\u304d\u3082\u306e\u304c\u304b\u308a', u''),
-              (u'MOVIN!!', u'\u30bf\u30ab\u30c1\u30e3', u'')]]):
-            xmcd_file = audiotools.XMCD.from_string(xmcd_data[0])
-
-            #first, check that tracks are read properly
-            for (i, data) in enumerate(tracks):
-                self.assertEqual(data, xmcd_file.get_track(i))
-
-            #then, check that setting tracks round-trip properly
-            for i in xrange(len(tracks)):
-                xmcd_file = audiotools.XMCD.from_string(xmcd_data[0])
-                xmcd_file.set_track(i,
-                                    u"Track %d" % (i),
-                                    u"Art\u00ecst N\u00e4me" * 40,
-                                    u"Extr\u00e5" * 40)
-                self.assertEqual(xmcd_file.get_track(i),
-                                 (u"Track %d" % (i),
-                                  u"Art\u00ecst N\u00e4me" * 40,
-                                  u"Extr\u00e5" * 40))
-
-            #finally, check that a file with set tracks round-trips
-            for i in xrange(len(tracks)):
-                xmcd_file = audiotools.XMCD.from_string(xmcd_data[0])
-                xmcd_file.set_track(i,
-                                    u"Track %d" % (i),
-                                    u"Art\u00ecst N\u00e4me" * 40,
-                                    u"Extr\u00e5" * 40)
-                xmcd_file2 = audiotools.XMCD.from_string(
-                    xmcd_file.to_string())
-                self.assertEqual(xmcd_file2.get_track(i),
-                                 (u"Track %d" % (i),
-                                  u"Art\u00ecst N\u00e4me" * 40,
-                                  u"Extr\u00e5" * 40))
-                self.assertEqual(xmcd_file.get_track(i),
-                                 xmcd_file2.get_track(i))
-
-    @LIB_CORE
-    def test_from_tracks(self):
-        track_files = [tempfile.NamedTemporaryFile() for i in xrange(5)]
-        try:
-            tracks = [audiotools.FlacAudio.from_pcm(
-                    track.name,
-                    BLANK_PCM_Reader(1)) for track in track_files]
-            metadatas = [
-                audiotools.MetaData(track_name=u"Track Name",
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=1,
-                                    track_total=5,
-                                    year=u"2010"),
-                audiotools.MetaData(track_name=u"Track Name 2",
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=2,
-                                    track_total=5,
-                                    year=u"2010"),
-                audiotools.MetaData(track_name=u"Track Name 4",
-                                    artist_name=u"Special Artist",
-                                    album_name=u"Test Album 2",
-                                    track_number=4,
-                                    track_total=5,
-                                    year=u"2009"),
-                audiotools.MetaData(track_name=u"Track N\u00e1me 3",
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=3,
-                                    track_total=5,
-                                    year=u"2010"),
-                audiotools.MetaData(track_name=u"Track Name 5" * 40,
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=5,
-                                    track_total=5,
-                                    year=u"2010")]
-            for (track, metadata) in zip(tracks, metadatas):
-                track.set_metadata(metadata)
-                self.assertEqual(track.get_metadata(), metadata)
-            xmcd = audiotools.XMCD.from_tracks(tracks)
-            self.assertEqual(len(xmcd), 5)
-            self.assertEqual(xmcd.album_name, u"Test Album")
-            self.assertEqual(xmcd.artist_name, u"Album Artist")
-            self.assertEqual(xmcd.year, u"2010")
-            self.assertEqual(xmcd.catalog, u"")
-            self.assertEqual(xmcd.extra, u"")
-
-            #note that track 4 loses its intentionally malformed
-            #album name and year during the round-trip
-            for metadata in [
-                audiotools.MetaData(track_name=u"Track Name",
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=1,
-                                    track_total=5,
-                                    year=u"2010"),
-                audiotools.MetaData(track_name=u"Track Name 2",
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=2,
-                                    track_total=5,
-                                    year=u"2010"),
-                audiotools.MetaData(track_name=u"Track Name 4",
-                                    artist_name=u"Special Artist",
-                                    album_name=u"Test Album",
-                                    track_number=4,
-                                    track_total=5,
-                                    year=u"2010"),
-                audiotools.MetaData(track_name=u"Track N\u00e1me 3",
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=3,
-                                    track_total=5,
-                                    year=u"2010"),
-                audiotools.MetaData(track_name=u"Track Name 5" * 40,
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=5,
-                                    track_total=5,
-                                    year=u"2010")]:
-                self.assertEqual(metadata,
-                                 xmcd.track_metadata(metadata.track_number))
-        finally:
-            for track in track_files:
-                track.close()
-
-    @LIB_CORE
-    def test_from_cuesheet(self):
-        CUESHEET = """REM DISCID 4A03DD06
-PERFORMER "Unknown Artist"
-TITLE "Unknown Title"
-FILE "cue.wav" WAVE
-  TRACK 01 AUDIO
-    TITLE "Track01"
-    INDEX 01 00:00:00
-  TRACK 02 AUDIO
-    TITLE "Track02"
-    INDEX 00 03:00:21
-    INDEX 01 03:02:21
-  TRACK 03 AUDIO
-    TITLE "Track03"
-    INDEX 00 06:00:13
-    INDEX 01 06:02:11
-  TRACK 04 AUDIO
-    TITLE "Track04"
-    INDEX 00 08:23:32
-    INDEX 01 08:25:32
-  TRACK 05 AUDIO
-    TITLE "Track05"
-    INDEX 00 12:27:40
-    INDEX 01 12:29:40
-  TRACK 06 AUDIO
-    TITLE "Track06"
-    INDEX 00 14:32:05
-    INDEX 01 14:34:05
-"""
-        cue_file = tempfile.NamedTemporaryFile(suffix=".cue")
-        try:
-            cue_file.write(CUESHEET)
-            cue_file.flush()
-
-            #from_cuesheet wraps around from_tracks,
-            #so I don't need to hit this one so hard
-            xmcd = audiotools.XMCD.from_cuesheet(
-                cuesheet=audiotools.read_sheet(cue_file.name),
-                total_frames=43646652,
-                sample_rate=44100,
-                metadata=audiotools.MetaData(album_name=u"Test Album",
-                                             artist_name=u"Test Artist"))
-
-            self.assertEqual(xmcd.album_name, u"Test Album")
-            self.assertEqual(xmcd.artist_name, u"Test Artist")
-            self.assertEqual(xmcd.year, u"")
-            self.assertEqual(xmcd.catalog, u"")
-            self.assertEqual(xmcd.extra, u"")
-            self.assertEqual(len(xmcd), 6)
-            for i in xrange(len(xmcd)):
-                self.assertEqual(xmcd.get_track(i),
-                                 (u"", u"", u""))
-        finally:
-            cue_file.close()
-
-    @LIB_CORE
-    def test_missing_fields(self):
-        xmcd_file_lines = ["# xmcd\r\n",
-                           "DTITLE=Album Artist / Album Name\r\n",
-                           "DYEAR=2010\r\n",
-                           "TTITLE0=Track 1\r\n",
-                           "TTITLE1=Track Artist / Track 2\r\n",
-                           "TTITLE2=Track 3\r\n",
-                           "EXTT0=Extra 1\r\n",
-                           "EXTT1=Extra 2\r\n",
-                           "EXTT2=Extra 3\r\n",
-                           "EXTD=Disc Extra\r\n"]
-
-        xmcd = audiotools.XMCD.from_string("".join(xmcd_file_lines))
-        self.assertEqual(xmcd.album_name, u"Album Name")
-        self.assertEqual(xmcd.artist_name, u"Album Artist")
-        self.assertEqual(xmcd.year, u"2010")
-        self.assertEqual(xmcd.catalog, u"")
-        self.assertEqual(xmcd.extra, u"Disc Extra")
-        self.assertEqual(xmcd.get_track(0),
-                         (u"Track 1", u"", u"Extra 1"))
-        self.assertEqual(xmcd.get_track(1),
-                         (u"Track 2", u"Track Artist", u"Extra 2"))
-        self.assertEqual(xmcd.get_track(2),
-                         (u"Track 3", u"", u"Extra 3"))
-
-
-        lines = xmcd_file_lines[:]
-        del(lines[0])
-        self.assertRaises(audiotools.XMCDException,
-                          audiotools.XMCD.from_string,
-                          "".join(lines))
-
-        lines = xmcd_file_lines[:]
-        del(lines[1])
-        xmcd = audiotools.XMCD.from_string("".join(lines))
-        self.assertEqual(xmcd.album_name, u"")
-        self.assertEqual(xmcd.artist_name, u"")
-        self.assertEqual(xmcd.year, u"2010")
-        self.assertEqual(xmcd.catalog, u"")
-        self.assertEqual(xmcd.extra, u"Disc Extra")
-        self.assertEqual(xmcd.get_track(0),
-                         (u"Track 1", u"", u"Extra 1"))
-        self.assertEqual(xmcd.get_track(1),
-                         (u"Track 2", u"Track Artist", u"Extra 2"))
-        self.assertEqual(xmcd.get_track(2),
-                         (u"Track 3", u"", u"Extra 3"))
-
-        lines = xmcd_file_lines[:]
-        del(lines[2])
-        xmcd = audiotools.XMCD.from_string("".join(lines))
-        self.assertEqual(xmcd.album_name, u"Album Name")
-        self.assertEqual(xmcd.artist_name, u"Album Artist")
-        self.assertEqual(xmcd.year, u"")
-        self.assertEqual(xmcd.catalog, u"")
-        self.assertEqual(xmcd.extra, u"Disc Extra")
-        self.assertEqual(xmcd.get_track(0),
-                         (u"Track 1", u"", u"Extra 1"))
-        self.assertEqual(xmcd.get_track(1),
-                         (u"Track 2", u"Track Artist", u"Extra 2"))
-        self.assertEqual(xmcd.get_track(2),
-                         (u"Track 3", u"", u"Extra 3"))
-
-        lines = xmcd_file_lines[:]
-        del(lines[3])
-        xmcd = audiotools.XMCD.from_string("".join(lines))
-        self.assertEqual(xmcd.album_name, u"Album Name")
-        self.assertEqual(xmcd.artist_name, u"Album Artist")
-        self.assertEqual(xmcd.year, u"2010")
-        self.assertEqual(xmcd.catalog, u"")
-        self.assertEqual(xmcd.extra, u"Disc Extra")
-        self.assertEqual(xmcd.get_track(0),
-                         (u"", u"", u""))
-        self.assertEqual(xmcd.get_track(1),
-                         (u"Track 2", u"Track Artist", u"Extra 2"))
-        self.assertEqual(xmcd.get_track(2),
-                         (u"Track 3", u"", u"Extra 3"))
-
-        lines = xmcd_file_lines[:]
-        del(lines[4])
-        xmcd = audiotools.XMCD.from_string("".join(lines))
-        self.assertEqual(xmcd.album_name, u"Album Name")
-        self.assertEqual(xmcd.artist_name, u"Album Artist")
-        self.assertEqual(xmcd.year, u"2010")
-        self.assertEqual(xmcd.catalog, u"")
-        self.assertEqual(xmcd.extra, u"Disc Extra")
-        self.assertEqual(xmcd.get_track(0),
-                         (u"Track 1", u"", u"Extra 1"))
-        self.assertEqual(xmcd.get_track(1),
-                         (u"", u"", u""))
-        self.assertEqual(xmcd.get_track(2),
-                         (u"Track 3", u"", u"Extra 3"))
-
-        lines = xmcd_file_lines[:]
-        del(lines[5])
-        xmcd = audiotools.XMCD.from_string("".join(lines))
-        self.assertEqual(xmcd.album_name, u"Album Name")
-        self.assertEqual(xmcd.artist_name, u"Album Artist")
-        self.assertEqual(xmcd.year, u"2010")
-        self.assertEqual(xmcd.catalog, u"")
-        self.assertEqual(xmcd.extra, u"Disc Extra")
-        self.assertEqual(xmcd.get_track(0),
-                         (u"Track 1", u"", u"Extra 1"))
-        self.assertEqual(xmcd.get_track(1),
-                         (u"Track 2", u"Track Artist", u"Extra 2"))
-        self.assertEqual(xmcd.get_track(2),
-                         (u"", u"", u""))
-
-        lines = xmcd_file_lines[:]
-        del(lines[6])
-        xmcd = audiotools.XMCD.from_string("".join(lines))
-        self.assertEqual(xmcd.album_name, u"Album Name")
-        self.assertEqual(xmcd.artist_name, u"Album Artist")
-        self.assertEqual(xmcd.year, u"2010")
-        self.assertEqual(xmcd.catalog, u"")
-        self.assertEqual(xmcd.extra, u"Disc Extra")
-        self.assertEqual(xmcd.get_track(0),
-                         (u"", u"", u""))
-        self.assertEqual(xmcd.get_track(1),
-                         (u"Track 2", u"Track Artist", u"Extra 2"))
-        self.assertEqual(xmcd.get_track(2),
-                         (u"Track 3", u"", u"Extra 3"))
-
-        lines = xmcd_file_lines[:]
-        del(lines[7])
-        xmcd = audiotools.XMCD.from_string("".join(lines))
-        self.assertEqual(xmcd.album_name, u"Album Name")
-        self.assertEqual(xmcd.artist_name, u"Album Artist")
-        self.assertEqual(xmcd.year, u"2010")
-        self.assertEqual(xmcd.catalog, u"")
-        self.assertEqual(xmcd.extra, u"Disc Extra")
-        self.assertEqual(xmcd.get_track(0),
-                         (u"Track 1", u"", u"Extra 1"))
-        self.assertEqual(xmcd.get_track(1),
-                         (u"", u"", u""))
-        self.assertEqual(xmcd.get_track(2),
-                         (u"Track 3", u"", u"Extra 3"))
-
-        lines = xmcd_file_lines[:]
-        del(lines[8])
-        xmcd = audiotools.XMCD.from_string("".join(lines))
-        self.assertEqual(xmcd.album_name, u"Album Name")
-        self.assertEqual(xmcd.artist_name, u"Album Artist")
-        self.assertEqual(xmcd.year, u"2010")
-        self.assertEqual(xmcd.catalog, u"")
-        self.assertEqual(xmcd.extra, u"Disc Extra")
-        self.assertEqual(xmcd.get_track(0),
-                         (u"Track 1", u"", u"Extra 1"))
-        self.assertEqual(xmcd.get_track(1),
-                         (u"Track 2", u"Track Artist", u"Extra 2"))
-        self.assertEqual(xmcd.get_track(2),
-                         (u"", u"", u""))
-
-        lines = xmcd_file_lines[:]
-        del(lines[9])
-        xmcd = audiotools.XMCD.from_string("".join(lines))
-        self.assertEqual(xmcd.album_name, u"Album Name")
-        self.assertEqual(xmcd.artist_name, u"Album Artist")
-        self.assertEqual(xmcd.year, u"2010")
-        self.assertEqual(xmcd.catalog, u"")
-        self.assertEqual(xmcd.extra, u"")
-        self.assertEqual(xmcd.get_track(0),
-                         (u"Track 1", u"", u"Extra 1"))
-        self.assertEqual(xmcd.get_track(1),
-                         (u"Track 2", u"Track Artist", u"Extra 2"))
-        self.assertEqual(xmcd.get_track(2),
-                         (u"Track 3", u"", u"Extra 3"))
-
-    @LIB_CORE
-    def test_metadata(self):
-        xmcd = audiotools.XMCD({"DTITLE": u"Album Artist / Album Name",
-                                "DYEAR": u"2010",
-                                "TTITLE0": u"Track 1",
-                                "TTITLE1": u"Track 2",
-                                "TTITLE2": u"Track 3"},
-                               [u"# xmcd"])
-        self.assertEqual(xmcd.metadata(),
-                         audiotools.MetaData(artist_name=u"Album Artist",
-                                             album_name=u"Album Name",
-                                             track_total=3,
-                                             year=u"2010"))
-
-
-
-class TestMusicBrainzXML(unittest.TestCase):
-    XML_FILES = [(
-"""QlpoOTFBWSZTWZHZsOEAAmLf+QAQeOf/9/1/3bA//99wf//K9x732X8f4FAGHp3dsABh2rtyIBUD
-U0JiCaaZNJ5TBpqGjU2oeo09JoAZAMjQ0yBoGgaAaNGhp6E9Qip+EaZBoVKABpkaAAABoAAAAAAA
-AAAAGU/AGiKNhR6npNAaAAANAAAAAAAAAAAAEGmJgAAAAAAAAAAAAAAjCMAAAACRQmggGhDTTVPJ
-H6NU0DIejUNNlHqbUBmoDTQNAANA0AADN5RLP0eOEM/mcT4+2+SfHNdRRk+lrXyi2DVDhUA3BpKS
-UhLoINkzquanlotv9PGs5xY5clNuvcvVLd0AwO1lx9K7n1nbrWefQoIZEg7p08WygJgBjCMXAuWL
-aSakgglqhUchgiqtqpNQKCAakvsJANKGjEWUwzlgYZJCsEthxOMeGKG4K2pgHQCwJqXaV5Sxi4rm
-SVxVEK+YOEm07ULFRFGF1B8CNoR02kIQORxurqm4bob4hbre+QrGJCwb+szLbl1rZe1NZhMojx4i
-ocOccTgMKMyVrQQwiHQgQCiBKoCpbbbhSFUsM6ERGvOvhGLQbxapnFuBw81zDZAbgtevZuBXYlwe
-62pJMU2K23PUgEwroQTY1Z613s2RZmuE1GARCzByvdOhW+szQjtriTiKXERJeKSM91nTZbkWGQrS
-zp7YpVRXM3UcbnZMCoyJFwWiUCsRQdZXRqZnaARKTscCcS4iJBVcY2pBN0luuyIBu5C+gqIGUHMR
-hTvi2pYmEqDiGhKDe8C4UIoyUKWplMbyLgHBRzGsZlBWbD1ihyHSC2tA9EtJ6CbVrpmcs4IVietG
-zUfETxBIEXGZwGMA+s0RRvXcTzC51VQOhPgBZbyljbW5O4zVshxFNtZjMoeTqlCMTmwI4lixpDPt
-ZrGGmBjeunrezi6XnWOHEDuq3q8g4q7CJA+sRdNyYQ0DDqRqU2nA0ksZtatMBm1BwYDgHlrCZVqw
-kOe6WHTuRhErm7EUs2HUCaRRJSkpm4gwJF1285rvaDJZscjHe8XBFGumVMs50ENjJqn5/ydU0bmT
-Wwg2x643BtuDg4OPZa04LcHP7UdWz0O10j5/F/S9LH+UPGn+ebt5EkLhYCW4WYrW4ptBHJGDLZAo
-5+/4agFzqHVDwpALZdEqAE3qgOA0CmIi0KUqGIVwnz/AwNketGnqeb7MjkqgPerUKZcrhxQFWTn5
-bZjpNpabQQRBJHAIoqeZlZl+/es379a9RxHl31vLzXmrSHDqcYzuwG4n2TGjDTj7TeK23WnDgAcL
-sFR4eHqQdxyJegRdEAZw0dDuaahUZc4T4MR+uNWqOi9rIdiAAMetaqFYbflOeeFNeaepNx5MdyJh
-41y41X490KaUN5kE+SQBYCzyC5m4PTywUHZL7sw8A3UtWCGn1JE1AqWKNI3mEGc7kY4IktPEYZ9c
-YTIbmjBHQYYwBlZFenCCXJFFAcUZSISAkRhT8bKeLLLIc7hIRlEKiqhznWW60y87uYzRvQ29hgLc
-AXcGrmZs+fL4ahjvZJhs4as9FWfHTOOxGmycq47d+G3bcw6jDuAKoaGwQRPcg4M9WKCseZJ46Kjw
-xR6igaSabIkIU1Tt6vDVxnTHXiyieoJ7EHWfhkDVuwClrYrLUrVpVHJDFuHStNdxGM2+6xsk2Vk2
-uhAkNOIDddEy1d95+BDseVVGVkgHfgU01jjLF800ohth9wGFo1ctUzReJxGALFKmLQ3qgIFKdxIF
-hhjfNW7C+ZKxAmLd2UqJj9TgwX+dO9ZUFnd9hOpl8hoU6m1U9DAEyOCp2TuzmuvjKjAUhS7IWVl3
-R18lzwccNcvevCzP1oCBXeCjlOZGk0d1Mw7x6VpTw1Gxfeu85ClIFWQAFmk9Ojabb2uCgni6MTTe
-ytRJl+K8QegMXQ00iotIG0sVttaComWXNeDsODekXSBejVllUlEoNpXYyKYK/cjFAKwwIFQgVIgX
-MtObIBUNgKrAYjJmroiHYrAFpInfXsaslxwIhxXKlioaeIvH8L22A95Axja5zmMYBGtr7nuSPgzD
-pJ2S4PmcbHewcGzhpNLMPDwegzwwZJv3YYmNDcmg7NePApT/5islCQ6AgfA5DIyGyBoEjCQUPU0A
-hH8l+2x+drf3W9tm9uRe0f3AX6G7Yj2oRM3vtHvb04qlt26OazBgWgqZ98kSXP8lwRPWSuppyEWI
-vCUDDrZiT4cevVmI9LRpPw/7DgctthGdx4P+LuSKcKEhI7Nhwg==""".decode('base64').decode('bz2'),
-                  {1:audiotools.MetaData(track_name=u'Frontier 2059', track_number=1, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   2:audiotools.MetaData(track_name=u"Welcome To My FanClub's Night! (Sheryl On Stage)", track_number=2, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   3:audiotools.MetaData(track_name=u"What 'bout my star? (Sheryl On Stage)", track_number=3, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   4:audiotools.MetaData(track_name=u"\u5c04\u624b\u5ea7\u2606\u5348\u5f8c\u4e5d\u6642Don't be late (Sheryl On Stage)", track_number=4, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   5:audiotools.MetaData(track_name=u'Vital Force', track_number=5, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   6:audiotools.MetaData(track_name=u'\u30c8\u30e9\u30a4\u30a2\u30f3\u30b0\u30e9\u30fc', track_number=6, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   7:audiotools.MetaData(track_name=u'Zero Hour', track_number=7, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   8:audiotools.MetaData(track_name=u"What 'bout my star? @Formo", track_number=8, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   9:audiotools.MetaData(track_name=u'Innocent green', track_number=9, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   10:audiotools.MetaData(track_name=u'\u30a2\u30a4\u30e2', track_number=10, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   11:audiotools.MetaData(track_name=u'\u30d3\u30c3\u30b0\u30fb\u30dc\u30fc\u30a4\u30ba', track_number=11, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   12:audiotools.MetaData(track_name=u'Private Army', track_number=12, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   13:audiotools.MetaData(track_name=u'SMS\u5c0f\u968a\u306e\u6b4c\u301c\u3042\u306e\u5a18\u306f\u30a8\u30a4\u30ea\u30a2\u30f3', track_number=13, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   14:audiotools.MetaData(track_name=u'\u30cb\u30f3\u30b8\u30fc\u30f3 Loves you yeah!', track_number=14, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   15:audiotools.MetaData(track_name=u'\u8d85\u6642\u7a7a\u98ef\u5e97 \u5a18\u3005: CM\u30bd\u30f3\u30b0(Ranka Version)', track_number=15, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   16:audiotools.MetaData(track_name=u"Alto's Theme", track_number=16, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   17:audiotools.MetaData(track_name=u'Tally Ho!', track_number=17, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   18:audiotools.MetaData(track_name=u'The Target', track_number=18, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   19:audiotools.MetaData(track_name=u'Bajura', track_number=19, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   20:audiotools.MetaData(track_name=u'\u30ad\u30e9\u30ad\u30e9', track_number=20, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   21:audiotools.MetaData(track_name=u'\u30a2\u30a4\u30e2\u301c\u9ce5\u306e\u3072\u3068', track_number=21, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   22:audiotools.MetaData(track_name=u'Take Off', track_number=22, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   23:audiotools.MetaData(track_name=u'\u30a4\u30f3\u30d5\u30a3\u30cb\u30c6\u30a3', track_number=23, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u''),
-                   24:audiotools.MetaData(track_name=u'\u30c0\u30a4\u30a2\u30e2\u30f3\u30c9 \u30af\u30ec\u30d0\u30b9', track_number=24, track_total=24, album_name=u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed', artist_name=u'\u83c5\u91ce\u3088\u3046\u5b50', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'VTCL-60060', copyright=u'', publisher=u'', year=u'2008', date=u'', album_number=0, album_total=0, comment=u'')}),
-                 (
-"""QlpoOTFBWSZTWeDENZEAAz5fgAAQeef//7/f36A/799xYAcrsz7YABzkbI43Y2qaoDJCGTU2iZMm
-NU0TMNJMjQepoGmgepggyEDQBJTUADyjTQABkAANNBzAEYJiAYBME0ZDQwCYIxMJCkamTJNqjaT0
-EbUPUGmgGRkGQAAcwBGCYgGATBNGQ0MAmCMTCKSYgIamlPRtRmhT2iDTITyhkG0jyhp6R7ft9O/i
-1Z4/pPTR3rEndbINagfOT+z0r/acXK6koolQSF4RDaTfyoI9CdAf2Q+6+JfP58XljKSVU1jYzzsv
-rxUEcNIiDTBtBYZYTFVzF0A1VJvW7m06MuQVuzR4vUQAFGcHeFFnWMEm8FVq6qJqbEzQY7rbK6Ht
-qIIYMjFCBtu0Kgu9S2ICsWHCtVacniFimTBY7DoXQua5d7FuDdoQaI7j9Atk1vS7WB9OeZUNoZdb
-Jh8ZzRmMZxD1rgPYXSVqTQ49QFKG8dGZ1mwhej0yDo6Bxd6YpMyuqauSI3gU1kOb5H5HKdqIViO0
-koeshQndohdYwJeDYy4GlnxbIpiIGW6ZW34jGcnGl7JHgzujXFHDKkYTtn1RTCY7hM3ZEghnCsZV
-tN0FT6zXwo1rVuBEzmCxnRlcv8257p0KUrRqrHp+p1Tk6TrecakrEMGAbjiW+kEGOCynYNnhjLjU
-jevIGSC2dXuxHShR0EbpUEoavBRa0bmbWx1npEYVQ3DzTJKGB0ctHoUzvdkzkoUqlr1siTbG1VK5
-EUfabNTHVcu/VJ8lvZnFVn01kCImuUqIkWNqLPlpPNUEtHTQmUIaCi1cNBDgXZsoN2XCIgMAi2IL
-Q1XW7KKUETE3o9YbxRqxoCuw97jW8vIodbPNuHRsgUth5UDmVJadRqmJxZUSFMziL7k9ZCqz5vaW
-FgcLRZ2ZoKwxeubSi44+ag8rykdMMX5mXIQbNdzTQG7C8Bmsq3MYQQQTNrIGgS4vIULY06UFebnd
-6rBd8XDbpZpT4ajY5mC3MMX4WbArheSqtzyOIXaQOZhUKQeouZtZ2L3zkcGMRGBO7gWiDsyhFFRt
-q6SllhMPhjYVWiJNLvuUMg6vuoEtGnSY21YtJbovyyy8Jv8UW8kF9u6SSSORscpsXGzYK/BWEtNm
-GsujIUrKN2Ss56MbB3SRk4bxF+EKoUK3W2AsFkLICV23uqIVUKRGUCGExDlsoIcahKJAkKFQshGc
-0ErO7j4BiaO0wgmJ2SNHzkTdJENkagwaYMaYe9wGJpMboKRMGNEZBjGM6GQQ3coRvVjxi3a5azbw
-V2gVpxUXcpNNinvCQE4T8LeBx3Zmja767xrTY8PDsCQIxqNdWXop6PZ7MDd2/sAXTjstBQ/VrbRa
-GgkePhNcp/8eC8fQodKhQP/gDae3RrBDxwWvs3cXPx/iZjzdEx1bXdbPxqYGMIsgT3qSaJY0YOkA
-7y+c199/G44GbVbgQ3qdCYiJou5xOPJtgaqO+Bdpv1s4VPlrqYjss52VQc8gkJG62B5CWQ3pJ4ID
-2nUsMdhqxaMSniimd0YCQNtlqY8II1ZfvgcTTKDmumwNSr9Jnc21qxPPKszuwbA6NCAkCuGukaY0
-ZzmgIVhczGuharoq2KBA1ggZ7z05EVtaCFpH2bMY3vGqjmChGcJqvF61SS9GPNCAki6WGNuBtHf/
-CE3h4ujYBYob9BCShBAMDChsTbaGk2x767N+WS14XpYH1zheB9tRfhwd5F91K66spY61AU7hX4dt
-2Tf96Y49yUZ3E0YN7AZQ+cZNo+sOojVlHli5Ne5TOdW1EK3dfLr3NByIC3y737D62wz5VUFzVvzU
-N4ACFBPjCrpRNQTVC8Z1ySDSAB2TeQC0C1dNofd58ZdJpx5BQ91DdLvXUhpDy65ZWYFhlAITweox
-pdyuqQMaQMYCJyZkZAhjEGeFJufzPeuugmEDAoSCyyXMmxbLC8obFzimVLGy2SbICQZubln4UsTK
-FSmMFEZk2yIQPFIKqFzJgGIIFgi2sd212zC6lNkrzMlOGps0Gek4N9LzrWfZecAwiHoL5395s37h
-QwX9ABOznbOweXBfpbYNR22fwAX6WjNFiFCUcCQMgp4BBAF/8y2cvHEcvzLQ5OL03nDC5mZw6LaT
-W9FZCg9QjtrHm+PNp5Zn2bw8qlCnfPkpA2E5xUKZkBwJAxJCxEpCpQIMbsZB7dYJ6sRQioEUZ11T
-sVKGBzFcZXXrlOQBq14B8sRQoAmahcoY5ihS8xKCFYgQreW2rhgZYAcGy7y0RK484IQbjqDn69OU
-Qav7keYLy1lhvaQNZW37i7kinChIcGIayIA=""".decode('base64').decode('bz2'),
-                  {1:audiotools.MetaData(track_name=u'Scars Left by Time (feat. Dale North)', track_number=1, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Ailsean', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   2:audiotools.MetaData(track_name=u'Star Stealing Girl (feat. Miss Sara Broome)', track_number=2, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'The OneUps', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   3:audiotools.MetaData(track_name=u"A Hero's Judgement (feat. Ailsean, Dale North & Roy McClanahan)", track_number=3, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Matt Pollard', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   4:audiotools.MetaData(track_name=u'Parallelism (The Frozen Flame)', track_number=4, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Matt Pollard', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   5:audiotools.MetaData(track_name=u'Guardian of Time (feat. Greg Kennedy)', track_number=5, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Mustin', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   6:audiotools.MetaData(track_name=u'The Boy Feared by Time', track_number=6, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Ailsean', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   7:audiotools.MetaData(track_name=u'The Girl Forgotten by Time', track_number=7, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Mark Porter', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   8:audiotools.MetaData(track_name=u'Wings of Time', track_number=8, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Dale North', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   9:audiotools.MetaData(track_name=u'Good to be Home', track_number=9, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Dale North', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   10:audiotools.MetaData(track_name=u'Dream of Another Time', track_number=10, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Mustin', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   11:audiotools.MetaData(track_name=u'Fields of Time', track_number=11, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Mellogear vs. Mark Porter', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   12:audiotools.MetaData(track_name=u'To Good Friends (feat. Tim Sheehy)', track_number=12, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Dale North', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   13:audiotools.MetaData(track_name=u'The Fighting Priest', track_number=13, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Ailsean', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   14:audiotools.MetaData(track_name=u'June Mermaid', track_number=14, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Dale North', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   15:audiotools.MetaData(track_name=u'Navigation is Key! (feat. Dale North)', track_number=15, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Matt Pollard', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   16:audiotools.MetaData(track_name=u'Gentle Wind', track_number=16, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Dale North', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   17:audiotools.MetaData(track_name=u'Star of Hope (feat. Mark Porter)', track_number=17, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Dale North', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u''),
-                   18:audiotools.MetaData(track_name=u'Shake the Heavens (feat. Matt Pollard & Dale North)', track_number=18, track_total=18, album_name=u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda', artist_name=u'Mark Porter', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'', copyright=u'', publisher=u'', year=u'', date=u'', album_number=0, album_total=0, comment=u'')}),
-                 (
-"""QlpoOTFBWSZTWborpk4AAb9f+QAQWIf/97//36A/79/xPeXqji45Q1ILwFAFBPIAg1bPdjQMGpkT
-RGgmg9CbSZNGhpoaAMJ6EBoAAAaGgGj0hFPTRoyaBSjEaGmg0AaAAAAAAAAAAA4aAaAA0BoDQAAA
-NNGmgDIAABo0yDDT1Up6mh6h6jJ6QABkDEABk0ABpoNMQAyAABJIEBMmjQ1PVTelPJk0T0n6o8oP
-TKP1Jo9NT1PUNAAAAAA5jWBiUcwUqQeZFEVhfPM5ZoFkRkUyeSggCQZmRESkhAaLVnaTswolMTqp
-VUriy58+eZUr/IogIFgJIqBg4DjeW5ErKKmgwAGWeGkB2zgzYEs+IZ+iyCFTtNww0FV4NO0wpGEW
-ugQ4THUaiJTOpSo8eIBawqjIUtOtpyIbvia0AmlUWR15hznCDaz0WLrOQ3gOVAcbNyjkFAwkuXMx
-ZVfdpfK/Tlhq0FLtPKEpqn0tOPcYtAm4CqUKmdXik1zmpOTxKUQSaxUBrQnVkSXgbroU1vFZT0Ty
-CQSq1ye98wjZwQQMKj6RpjVDMJIOTgK8JA9xuqkMG4oYlPAZgxmzYmRSnLEHVrTC0GNInW4zogGs
-hYDhh11gLMDqvR9bFBTuLxHI1Y3uECq4ARzgvBr2BRAwnJkgtYyQ3XC0b0tJoAyjZanQzhOQ1cJ1
-SLJZQsTILWnGkZuoYZrHI2KtBQZxioxjGZUoLMUluE3TqVDWKHeohCMQQXrUgiUFQovXAOwM3lOb
-2QXvAxci0os2AUMHOor2uYOBHJHErAV2Y7SZoYjWjK5VyB63qRkIYoW2DXbDOyAJQG4uBxamr1+/
-qe3rNu0yGSPhRhR46vEP/Hd/X9/BlEBzsAiOnNwPchzkD3CtZzLsgk/N3ts4HGTsww0nOdsYDREI
-sD4gMyOJA4ZwhkDpJRgkKHfxLvV5jMdR4SC20em+R5CDjm7fiK+oavx9BI6fZs5CuJaKxFkOsyFE
-iS7o4JZXjh3r9W4WBhNNMTPJojE93sdZIy4jFZNG1rVZWNYUPmjEjBQJY3UKkBRiGLUCKFCbTsah
-ChKCpMbUVUINMGyTz1CFXhHbyCCqMlG2PQxA6GpBBtFxdBgecg89BnF7d5ZJluGEATArSjyXG5Tb
-iEyjQxJgMqrk0uxZU0UFbuKgYMKEwB0gjHlYtRlzYeMpgJVvp40gKwmJTDIA0roA6AJrV0xG7SRp
-ua3UX3X54T3ZhBqnpM9NemyOq3s1oNYGE+N5jPkrtnByINkmdNlzyn0PG1V1xplVHHtbwvUZawu8
-sBwmBMIYAQMhAuBPwViZ+G/ckSCCG8DK8URNxh3QHCjAqBbU0cK9VDEcTccYsuJajyJGQs44kz0s
-ty0ngwGHXTYo4OGaNEqSxqpQqm1ore2zhrM/FgdqNaHaLxtG6U0iDmOBHc291HesKgpYAtUJ3oGG
-AZMzHGwgryCCc32uJqLdNAgiLfRuJQoKIk+yEAQTdvyJsGB1kAmsGQkk48yTrJQnABAgABPOihOU
-yMhFVM08w8wtlqiXpkgh2GfuREHPEsRMeiWI0EyOfpQarp2kINnCPKADwG5uYMzNhvQMTPQ8qQ4H
-CCAgoK8CsxTxre/rnFTMagyoLkFyKECvGKtIjW4nEDh1V74pJ5WTPHyamvNlgCKgRYgkgoEERwD2
-YCegjsMqDdN+VaW+AMYnBcp4HS4eFxdcgYpDyj+gF8PwDf3+jv5/z6YwvHbaV4nbSO9CzD7BoJQg
-nbvdly53/Ea4Pe78RYPpd/V9AYf/k/36b75h+9/i7kinChIXRXTJwA==""".decode('base64').decode('bz2'),
-                  {1:audiotools.MetaData(track_name=u'\u30e1\u30ea\u30c3\u30b5', track_number=1, track_total=8, album_name=u'FULLMETAL ALCHEMIST COMPLETE BEST', artist_name=u'\u30dd\u30eb\u30ce\u30b0\u30e9\u30d5\u30a3\u30c6\u30a3', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'SVWC-7218', copyright=u'', publisher=u'', year=u'2005', date=u'', album_number=0, album_total=0, comment=u''),
-                   2:audiotools.MetaData(track_name=u'\u6d88\u305b\u306a\u3044\u7f6a', track_number=2, track_total=8, album_name=u'FULLMETAL ALCHEMIST COMPLETE BEST', artist_name=u'\u5317\u51fa\u83dc\u5948', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'SVWC-7218', copyright=u'', publisher=u'', year=u'2005', date=u'', album_number=0, album_total=0, comment=u''),
-                   3:audiotools.MetaData(track_name=u'READY STEADY GO', track_number=3, track_total=8, album_name=u'FULLMETAL ALCHEMIST COMPLETE BEST', artist_name=u"L'Arc~en~Ciel", performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'SVWC-7218', copyright=u'', publisher=u'', year=u'2005', date=u'', album_number=0, album_total=0, comment=u''),
-                   4:audiotools.MetaData(track_name=u'\u6249\u306e\u5411\u3053\u3046\u3078', track_number=4, track_total=8, album_name=u'FULLMETAL ALCHEMIST COMPLETE BEST', artist_name=u'YeLLOW Generation', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'SVWC-7218', copyright=u'', publisher=u'', year=u'2005', date=u'', album_number=0, album_total=0, comment=u''),
-                   5:audiotools.MetaData(track_name=u'UNDO', track_number=5, track_total=8, album_name=u'FULLMETAL ALCHEMIST COMPLETE BEST', artist_name=u'COOL JOKE', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'SVWC-7218', copyright=u'', publisher=u'', year=u'2005', date=u'', album_number=0, album_total=0, comment=u''),
-                   6:audiotools.MetaData(track_name=u'Motherland', track_number=6, track_total=8, album_name=u'FULLMETAL ALCHEMIST COMPLETE BEST', artist_name=u'Crystal Kay', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'SVWC-7218', copyright=u'', publisher=u'', year=u'2005', date=u'', album_number=0, album_total=0, comment=u''),
-                   7:audiotools.MetaData(track_name=u'\u30ea\u30e9\u30a4\u30c8', track_number=7, track_total=8, album_name=u'FULLMETAL ALCHEMIST COMPLETE BEST', artist_name=u'ASIAN KUNG-FU GENERATION', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'SVWC-7218', copyright=u'', publisher=u'', year=u'2005', date=u'', album_number=0, album_total=0, comment=u''),
-                   8:audiotools.MetaData(track_name=u'I Will', track_number=8, track_total=8, album_name=u'FULLMETAL ALCHEMIST COMPLETE BEST', artist_name=u'Sowelu', performer_name=u'', composer_name=u'', conductor_name=u'', media=u'', ISRC=u'', catalog=u'SVWC-7218', copyright=u'', publisher=u'', year=u'2005', date=u'', album_number=0, album_total=0, comment=u'')})]
-
-    @LIB_CORE
-    def testreading(self):
-        #check that reading in XML file data matches
-        #its expected values
-        for (xml, metadata) in self.XML_FILES:
-            mb_xml = audiotools.MusicBrainzReleaseXML.from_string(xml)
-            for i in xrange(len(mb_xml)):
-                self.assertEqual(mb_xml.track_metadata(i + 1), metadata[i + 1])
-
-        #check that reading in an XML file matches
-        #its expected values
-        for (xml, metadata) in self.XML_FILES:
-            f = tempfile.NamedTemporaryFile(suffix=".xml")
-            try:
-                f.write(xml)
-                f.flush()
-                f.seek(0, 0)
-                mb_xml = audiotools.MusicBrainzReleaseXML.from_string(f.read())
-                for i in xrange(len(mb_xml)):
-                    self.assertEqual(mb_xml.track_metadata(i + 1),
-                                     metadata[i + 1])
-            finally:
-                f.close()
-
-    @LIB_CORE
-    def testtracktagging(self):
-        for (xml, metadata) in self.XML_FILES:
-            #build a bunch of temporary FLAC files
-            temp_files = [tempfile.NamedTemporaryFile(suffix=".flac")
-                          for i in metadata.keys()]
-            try:
-                temp_tracks = [audiotools.FlacAudio.from_pcm(
-                        temp_file.name,
-                        BLANK_PCM_Reader(5),
-                        "1") for temp_file in temp_files]
-                for (i, track) in enumerate(temp_tracks):
-                    track.set_metadata(audiotools.MetaData(track_number=i + 1))
-
-                #tag them with metadata from XML
-                xml_metadata = audiotools.MusicBrainzReleaseXML.from_string(xml)
-                for track in temp_tracks:
-                    track.set_metadata(
-                        xml_metadata.track_metadata(track.track_number()))
-
-                #build a new XML file from track metadata
-                new_xml = audiotools.MusicBrainzReleaseXML.from_tracks(
-                    temp_tracks)
-
-                #check that the original XML values match the track ones
-                for i in xrange(len(new_xml)):
-                    self.assertEqual(metadata[i + 1],
-                                     new_xml.track_metadata(i + 1))
-            finally:
-                for t in temp_files:
-                    t.close()
-
-    @LIB_CORE
-    def testorder(self):
-        VALID_ORDER = \
-"""QlpoOTFBWSZTWQRNLWEAAMFfyQAQWGf/979fWCA/799wAIEJIQKgQAKLoc44CEqaSJ6bRMUzSejF
-P1I9Q0GjyNTE0D1AD1CJiGgKeRRp6ZEAAGmgAAAAaEaiA0AAAAAABoAABIoQJ6ieo9JslGeVG9U0
-NPUBoaBkeUAJduZ5atyq+8Qc8hinE2gjl5at2wXrmqloSptHFn6YW86gJh7GnEnIAKMMoaQXMozq
-1K7UmkegbTX00RcL0uyTdGC8Tme983GQhA7HG9bzzGQbhdre4hYMS3XjLNbnhrtDPc9Qcb8MMjmX
-ym8V8hgpuGNwtUIIRolAixMpPW0GcINraYOOFjJLxWWC5sJUFqUIyF7q1JguFowcQRi8yXCyAkBu
-eYnmBlYPxIJtedBnSs6IEbTkMosBGvk+dBhRIzc40cU11rKR+AX5sfbAAL7FSaN/OQrUpXKIAAQV
-mzERCZ2ZzYgaEesQoAFlTdS40B41aoBnSQGgMgjhNVSK8Tlt/DI4GS69igp+lxwGDCsf3G13fFQY
-2oJWjJpmpNDi0Guu4mihwtWdY5OHRZfoa1SkXbwjEY6Bn9CSuQTEIPassuTLFp8TAdTIK0oaMieM
-MYonf4BIdUeufDDAKigH4ccczUCgOPYYyWxYZrEkXeRueqkwPhOIDY2ltvr9DR6VhvVkqY+ePzFM
-pvxMOSfwvI7Oh23+Pb1dDyNL1nTn4oHKLMvOYiWCx8ETT2TNkmBq+tNcmhtiMxHStVhp00iONLHF
-Koq1WRiFGPKcFBQsVENDV7AZOl11SKigtJKbdVJwWDV2Zr3mjgZWbYQQU9pnQdakbCPWXVuQiwjc
-Bffsbb2bpGl6BmBPAJ+TGhKrqYuIiYnFbboQTuOeBUQIV8kaEokx0OycEFZNEkaBErSISbCrnLTK
-dyoZiBkU31Oq3oLCLfCMIi75/brrrf67/F3JFOFCQBE0tYQ=""".decode('base64').decode('bz2')
-
-        INVALID_ORDER = \
-"""QlpoOTFBWSZTWRPfcE8AAMHfyQAQWGf/979fWCA/799wAIEJIQKgQAKLoXcaghKmiRpkwk2TIZPU
-j1MTRowTE0DQA9QiYhoCnkKaegQAA0aAA0AAIKJ+kmgyDIDCAaMgAaaNMQBhIkQnqelNqm0nspDe
-pG1APUBoAZHlACc34Hlq4K1d4gzyH1MTeCMcWrhuF7MOmelNLaZuqHnbkUAxdy9mIogAowyhcF7K
-M69Wu3NpHoG019VEXDGl+KbowXqdT3PB9yGz3uWK3nlOcNwupvcRQYluxGU5HXK60OW96g5H5MmJ
-zMcpvFecwU3JhcLVCCEaJQIsTKT1tBnEDa2mDjhYyS8FlgubCVBalCMhe6tSYLhaMHEEYvMlwsgJ
-AbnmJ5gZWD8CCbXnQZ0rOiBG05DKLARr5PnQYUSM3ONHFNdaykfiGPNh7oABfYqTPo4CJag5hUAC
-wClmOyIhS4S+soJkaui++gXW7YPDMJTiYQ5QXwAiEjFMzEXhRkifr9SE+PIwG5vQgCAgNOKEqCnS
-qkHa4skzTaMNRmYtBrrt1ooYclnWMoDLtsUtapSL5cw+j7oGP0JdUol0Qe13571+PR4lozvwakpa
-PxvENwUUW7IkWu5sohigFRwFuKS5hagUhi3EhPtWGDakq3Ebj01FD16IabG0uXHR52j0LLeqTtl5
-pfMVS3HMy46/DEls6HHNlv5+hGkCSGSrpWSiqiYoGDwrFjYQb7ZecQCH1s2pttDEbRHgXFQvvtEd
-hLPNK4u4qSkFmfZOChRRWRpaxYDLKmi6ZcWGBNVbutOCya17Tk3mngc9OWIQW9RtsOlTNhLpNehz
-EUJawMcTYN7N0y96RmRXIK+LOxK7yMWokZmrDDSgrrOaC4gjRxysSkVHY6VhBoKomjSIngSCbYXc
-xgc9dasZmA0qsKdVxQWEfGIfIyv5/a66+X9X/i7kinChICe+4J4=""".decode('base64').decode('bz2')
-
-        self.assert_(VALID_ORDER != INVALID_ORDER)
-
-        self.assertEqual(audiotools.MusicBrainzReleaseXML.from_string(
-                VALID_ORDER).metadata(),
-                         audiotools.MusicBrainzReleaseXML.from_string(
-                INVALID_ORDER).metadata())
-
-        self.assertEqual(audiotools.MusicBrainzReleaseXML.from_string(
-                VALID_ORDER).to_string().replace('\n', ''),
-                         VALID_ORDER.replace('\n', ''))
-
-        self.assertEqual(audiotools.MusicBrainzReleaseXML.from_string(
-                INVALID_ORDER).to_string().replace('\n', ''),
-                         VALID_ORDER.replace('\n', ''))
-
-    @LIB_CORE
-    def test_attrs(self):
-        for (xml_data, attrs) in zip(
-            self.XML_FILES,
-            [{"album_name": u'\u30de\u30af\u30ed\u30b9\u30d5\u30ed\u30f3\u30c6\u30a3\u30a2: \u5a18\u30d5\u30ed',
-              "artist_name": u'\u83c5\u91ce\u3088\u3046\u5b50',
-              "year": u'2008',
-              "catalog": u'VTCL-60060',
-              "extra": u""},
-             {"album_name": u'OneUp Studios presents Time & Space ~ A Tribute to Yasunori Mitsuda',
-              "artist_name": u'Various Artists',
-              "year": u'',
-              "catalog": u'',
-              "extra": u""},
-             {"album_name": u'FULLMETAL ALCHEMIST COMPLETE BEST',
-              "artist_name": u'Various Artists',
-              "year": u'2005',
-              "catalog": u'SVWC-7218',
-              "extra": u""}]):
-            mb_xml = audiotools.MusicBrainzReleaseXML.from_string(xml_data[0])
-
-            #first, check that attributes are retrieved properly
-            for key in attrs.keys():
-                self.assertEqual(getattr(mb_xml, key),
-                                 attrs[key])
-
-        #then, check that setting attributes round-trip properly
-        for (xml_data, xml_metadata) in self.XML_FILES:
-            for (attr, new_value) in [
-                ("album_name", u"New Album"),
-                ("artist_name", u"T\u00e9st N\u00e0me"),
-                ("year", u"2010"),
-                ("catalog", u"Catalog #")]:
-                mb_xml = audiotools.MusicBrainzReleaseXML.from_string(
-                    xml_data)
-                setattr(mb_xml, attr, new_value)
-                self.assertEqual(getattr(mb_xml, attr), new_value)
-
-        #finally, check that the file with set attributes
-        #round-trips properly
-        for (xml_data, xml_metadata) in self.XML_FILES:
-            for (attr, new_value) in [
-                ("album_name", u"New Album"),
-                ("artist_name", u"T\u00e9st N\u00e0me"),
-                ("year", u"2010"),
-                ("catalog", u"Catalog #")]:
-                mb_xml = audiotools.MusicBrainzReleaseXML.from_string(
-                    xml_data)
-                setattr(mb_xml, attr, new_value)
-                mb_xml2 = audiotools.MusicBrainzReleaseXML.from_string(
-                    mb_xml.to_string())
-                self.assertEqual(getattr(mb_xml2, attr), new_value)
-                self.assertEqual(getattr(mb_xml, attr),
-                                 getattr(mb_xml2, attr))
-
-    @LIB_CORE
-    def test_tracks(self):
-        for ((xml_data, metadata),
-             track_metadata) in zip(self.XML_FILES,
-                                    [[(u"Frontier 2059",
-                                       u"", u""),
-                                      (u"Welcome To My FanClub's Night! (Sheryl On Stage)",
-                                       u"", u""),
-                                      (u"What 'bout my star? (Sheryl On Stage)",
-                                       u"", u""),
-                                      (u"\u5c04\u624b\u5ea7\u2606\u5348\u5f8c\u4e5d\u6642Don't be late (Sheryl On Stage)",
-                                       u"", u""),
-                                      (u"Vital Force",
-                                       u"", u""),
-                                      (u"\u30c8\u30e9\u30a4\u30a2\u30f3\u30b0\u30e9\u30fc",
-                                       u"", u""),
-                                      (u"Zero Hour",
-                                       u"", u""),
-                                      (u"What 'bout my star? @Formo",
-                                       u"", u""),
-                                      (u"Innocent green",
-                                       u"", u""),
-                                      (u"\u30a2\u30a4\u30e2",
-                                       u"", u""),
-                                      (u"\u30d3\u30c3\u30b0\u30fb\u30dc\u30fc\u30a4\u30ba",
-                                       u"", u""),
-                                      (u"Private Army",
-                                       u"", u""),
-                                      (u"SMS\u5c0f\u968a\u306e\u6b4c\u301c\u3042\u306e\u5a18\u306f\u30a8\u30a4\u30ea\u30a2\u30f3",
-                                       u"", u""),
-                                      (u"\u30cb\u30f3\u30b8\u30fc\u30f3 Loves you yeah!",
-                                       u"", u""),
-                                      (u"\u8d85\u6642\u7a7a\u98ef\u5e97 \u5a18\u3005: CM\u30bd\u30f3\u30b0(Ranka Version)",
-                                       u"", u""),
-                                      (u"Alto's Theme",
-                                       u"", u""),
-                                      (u"Tally Ho!",
-                                       u"", u""),
-                                      (u"The Target",
-                                       u"", u""),
-                                      (u"Bajura",
-                                       u"", u""),
-                                      (u"\u30ad\u30e9\u30ad\u30e9",
-                                       u"", u""),
-                                      (u"\u30a2\u30a4\u30e2\u301c\u9ce5\u306e\u3072\u3068",
-                                       u"", u""),
-                                      (u"Take Off",
-                                       u"", u""),
-                                      (u"\u30a4\u30f3\u30d5\u30a3\u30cb\u30c6\u30a3",
-                                       u"", u""),
-                                      (u"\u30c0\u30a4\u30a2\u30e2\u30f3\u30c9 \u30af\u30ec\u30d0\u30b9",
-                                       u"", u"")],
-                                     [(u"Scars Left by Time (feat. Dale North)",
-                                       u"Ailsean", u""),
-                                      (u"Star Stealing Girl (feat. Miss Sara Broome)",
-                                       u"The OneUps", u""),
-                                      (u"A Hero's Judgement (feat. Ailsean, Dale North & Roy McClanahan)",
-                                       u"Matt Pollard", u""),
-                                      (u"Parallelism (The Frozen Flame)",
-                                       u"Matt Pollard", u""),
-                                      (u"Guardian of Time (feat. Greg Kennedy)",
-                                       u"Mustin", u""),
-                                      (u"The Boy Feared by Time",
-                                       u"Ailsean", u""),
-                                      (u"The Girl Forgotten by Time",
-                                       u"Mark Porter", u""),
-                                      (u"Wings of Time",
-                                       u"Dale North", u""),
-                                      (u"Good to be Home",
-                                       u"Dale North", u""),
-                                      (u"Dream of Another Time",
-                                       u"Mustin", u""),
-                                      (u"Fields of Time",
-                                       u"Mellogear vs. Mark Porter", u""),
-                                      (u"To Good Friends (feat. Tim Sheehy)",
-                                       u"Dale North", u""),
-                                      (u"The Fighting Priest",
-                                       u"Ailsean", u""),
-                                      (u"June Mermaid",
-                                       u"Dale North", u""),
-                                      (u"Navigation is Key! (feat. Dale North)",
-                                       u"Matt Pollard", u""),
-                                      (u"Gentle Wind",
-                                       u"Dale North", u""),
-                                      (u"Star of Hope (feat. Mark Porter)",
-                                       u"Dale North", u""),
-                                      (u"Shake the Heavens (feat. Matt Pollard & Dale North)",
-                                       u"Mark Porter", u"")],
-                                     [(u"\u30e1\u30ea\u30c3\u30b5",
-                                       u"\u30dd\u30eb\u30ce\u30b0\u30e9\u30d5\u30a3\u30c6\u30a3", u""),
-                                      (u"\u6d88\u305b\u306a\u3044\u7f6a",
-                                       u"\u5317\u51fa\u83dc\u5948", u""),
-                                      (u"READY STEADY GO",
-                                       u"L'Arc~en~Ciel", u""),
-                                      (u"\u6249\u306e\u5411\u3053\u3046\u3078",
-                                       u"YeLLOW Generation", u""),
-                                      (u"UNDO",
-                                       u"COOL JOKE", u""),
-                                      (u"Motherland",
-                                       u"Crystal Kay", u""),
-                                      (u"\u30ea\u30e9\u30a4\u30c8",
-                                       u"ASIAN KUNG-FU GENERATION", u""),
-                                      (u"I Will",
-                                       u"Sowelu", u"")]]):
-            mb_xml = audiotools.MusicBrainzReleaseXML.from_string(xml_data)
-
-            #first, check that tracks are read properly
-            for (i, data) in enumerate(metadata):
-                self.assertEqual(track_metadata[i],
-                                 mb_xml.get_track(i))
-
-            #then, check that setting tracks round-trip properly
-            for i in xrange(len(metadata)):
-                mb_xml = audiotools.MusicBrainzReleaseXML.from_string(
-                    xml_data)
-                mb_xml.set_track(i,
-                                 u"Track %d" % (i),
-                                 u"Art\u00ecst N\u00e4me" * 40,
-                                 u"")
-                self.assertEqual(mb_xml.get_track(i),
-                                 (u"Track %d" % (i),
-                                  u"Art\u00ecst N\u00e4me" * 40,
-                                  u""))
-
-            #finally, check that a file with set tracks round-trips
-            for i in xrange(len(metadata)):
-                mb_xml = audiotools.MusicBrainzReleaseXML.from_string(
-                    xml_data)
-                mb_xml.set_track(i,
-                                 u"Track %d" % (i),
-                                 u"Art\u00ecst N\u00e4me" * 40,
-                                 u"")
-                mb_xml2 = audiotools.MusicBrainzReleaseXML.from_string(
-                    mb_xml.to_string())
-                self.assertEqual(mb_xml2.get_track(i),
-                                 (u"Track %d" % (i),
-                                  u"Art\u00ecst N\u00e4me" * 40,
-                                  u""))
-                self.assertEqual(mb_xml.get_track(i),
-                                 mb_xml2.get_track(i))
-
-    @LIB_CORE
-    def test_from_tracks(self):
-        track_files = [tempfile.NamedTemporaryFile() for i in xrange(5)]
-        try:
-            tracks = [audiotools.FlacAudio.from_pcm(
-                    track.name,
-                    BLANK_PCM_Reader(1)) for track in track_files]
-            metadatas = [
-                audiotools.MetaData(track_name=u"Track Name",
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=1,
-                                    track_total=5,
-                                    year=u"2010"),
-                audiotools.MetaData(track_name=u"Track Name 2",
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=2,
-                                    track_total=5,
-                                    year=u"2010"),
-                audiotools.MetaData(track_name=u"Track Name 4",
-                                    artist_name=u"Special Artist",
-                                    album_name=u"Test Album 2",
-                                    track_number=4,
-                                    track_total=5,
-                                    year=u"2009"),
-                audiotools.MetaData(track_name=u"Track N\u00e1me 3",
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=3,
-                                    track_total=5,
-                                    year=u"2010"),
-                audiotools.MetaData(track_name=u"Track Name 5" * 40,
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=5,
-                                    track_total=5,
-                                    year=u"2010")]
-            for (track, metadata) in zip(tracks, metadatas):
-                track.set_metadata(metadata)
-                self.assertEqual(track.get_metadata(), metadata)
-            mb_xml = audiotools.MusicBrainzReleaseXML.from_tracks(tracks)
-            self.assertEqual(len(mb_xml), 5)
-            self.assertEqual(mb_xml.album_name, u"Test Album")
-            self.assertEqual(mb_xml.artist_name, u"Album Artist")
-            self.assertEqual(mb_xml.year, u"2010")
-            self.assertEqual(mb_xml.catalog, u"")
-            self.assertEqual(mb_xml.extra, u"")
-
-            #note that track 4 loses its intentionally malformed
-            #album name and year during the round-trip
-            for metadata in [
-                audiotools.MetaData(track_name=u"Track Name",
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=1,
-                                    track_total=5,
-                                    year=u"2010"),
-                audiotools.MetaData(track_name=u"Track Name 2",
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=2,
-                                    track_total=5,
-                                    year=u"2010"),
-                audiotools.MetaData(track_name=u"Track Name 4",
-                                    artist_name=u"Special Artist",
-                                    album_name=u"Test Album",
-                                    track_number=4,
-                                    track_total=5,
-                                    year=u"2010"),
-                audiotools.MetaData(track_name=u"Track N\u00e1me 3",
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=3,
-                                    track_total=5,
-                                    year=u"2010"),
-                audiotools.MetaData(track_name=u"Track Name 5" * 40,
-                                    artist_name=u"Album Artist",
-                                    album_name=u"Test Album",
-                                    track_number=5,
-                                    track_total=5,
-                                    year=u"2010")]:
-                self.assertEqual(metadata,
-                                 mb_xml.track_metadata(metadata.track_number))
-        finally:
-            for track in track_files:
-                track.close()
-
-    @LIB_CORE
-    def test_from_cuesheet(self):
-        CUESHEET = """REM DISCID 4A03DD06
-PERFORMER "Unknown Artist"
-TITLE "Unknown Title"
-FILE "cue.wav" WAVE
-  TRACK 01 AUDIO
-    TITLE "Track01"
-    INDEX 01 00:00:00
-  TRACK 02 AUDIO
-    TITLE "Track02"
-    INDEX 00 03:00:21
-    INDEX 01 03:02:21
-  TRACK 03 AUDIO
-    TITLE "Track03"
-    INDEX 00 06:00:13
-    INDEX 01 06:02:11
-  TRACK 04 AUDIO
-    TITLE "Track04"
-    INDEX 00 08:23:32
-    INDEX 01 08:25:32
-  TRACK 05 AUDIO
-    TITLE "Track05"
-    INDEX 00 12:27:40
-    INDEX 01 12:29:40
-  TRACK 06 AUDIO
-    TITLE "Track06"
-    INDEX 00 14:32:05
-    INDEX 01 14:34:05
-"""
-        cue_file = tempfile.NamedTemporaryFile(suffix=".cue")
-        try:
-            cue_file.write(CUESHEET)
-            cue_file.flush()
-
-            #from_cuesheet wraps around from_tracks,
-            #so I don't need to hit this one so hard
-            mb_xml = audiotools.MusicBrainzReleaseXML.from_cuesheet(
-                cuesheet=audiotools.read_sheet(cue_file.name),
-                total_frames=43646652,
-                sample_rate=44100,
-                metadata=audiotools.MetaData(album_name=u"Test Album",
-                                             artist_name=u"Test Artist"))
-
-            self.assertEqual(mb_xml.album_name, u"Test Album")
-            self.assertEqual(mb_xml.artist_name, u"Test Artist")
-            self.assertEqual(mb_xml.year, u"")
-            self.assertEqual(mb_xml.catalog, u"")
-            self.assertEqual(mb_xml.extra, u"")
-            self.assertEqual(len(mb_xml), 6)
-            for i in xrange(len(mb_xml)):
-                self.assertEqual(mb_xml.get_track(i),
-                                 (u"", u"", u""))
-        finally:
-            cue_file.close()
-
-
-    @LIB_CORE
-    def test_missing_fields(self):
-        def remove_node(parent, *to_remove):
-            toremove_parent = audiotools.walk_xml_tree(parent,
-                                                       *to_remove[0:-1])
-            if (len(to_remove) > 2):
-                self.assertEqual(toremove_parent.tagName, to_remove[-2])
-            toremove = audiotools.walk_xml_tree(toremove_parent,
-                                                to_remove[-1])
-            self.assertEqual(toremove.tagName, to_remove[-1])
-            toremove_parent.removeChild(toremove)
-
-        from xml.dom.minidom import parseString
-
-        xml_data = """<?xml version="1.0" encoding="utf-8"?><metadata xmlns="http://musicbrainz.org/ns/mmd-1.0#" xmlns:ext="http://musicbrainz.org/ns/ext-1.0#"><release-list><release><title>Album Name</title><artist><name>Album Artist</name></artist><release-event-list><event date="2010" catalog-number="cat#"/></release-event-list><track-list><track><title>Track 1</title><duration>272000</duration></track><track><title>Track 2</title><artist><name>Track Artist</name></artist><duration>426333</duration></track><track><title>Track 3</title><duration>249560</duration></track></track-list></release></release-list></metadata>"""
-
-        xml_dom = parseString(xml_data)
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"Album Artist")
-        self.assertEqual(xml.year, u"2010")
-        self.assertEqual(xml.catalog, u"cat#")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(xml.get_track(0),
-                         (u"Track 1", u"", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"Track 2", u"Track Artist", u""))
-        self.assertEqual(xml.get_track(2),
-                         (u"Track 3", u"", u""))
-
-        xml_dom = parseString(xml_data)
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"Album Artist")
-        self.assertEqual(xml.year, u"2010")
-        self.assertEqual(xml.catalog, u"cat#")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(xml.get_track(0),
-                         (u"Track 1", u"", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"Track 2", u"Track Artist", u""))
-        self.assertEqual(xml.get_track(2),
-                         (u"Track 3", u"", u""))
-
-        #removing <metadata>
-        xml_dom = parseString(xml_data)
-        xml_dom.removeChild(xml_dom.firstChild)
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"")
-        self.assertEqual(xml.artist_name, u"")
-        self.assertEqual(xml.year, u"")
-        self.assertEqual(xml.catalog, u"")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(len(xml), 0)
-
-        #removing <release-list>
-        xml_dom = parseString(xml_data)
-        remove_node(xml_dom, u'metadata', u'release-list')
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"")
-        self.assertEqual(xml.artist_name, u"")
-        self.assertEqual(xml.year, u"")
-        self.assertEqual(xml.catalog, u"")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(len(xml), 0)
-
-        #removing <release>
-        xml_dom = parseString(xml_data)
-        remove_node(xml_dom, u'metadata', u'release-list', u'release')
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"")
-        self.assertEqual(xml.artist_name, u"")
-        self.assertEqual(xml.year, u"")
-        self.assertEqual(xml.catalog, u"")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(len(xml), 0)
-
-        #removing <title>
-        xml_dom = parseString(xml_data)
-        remove_node(xml_dom, u'metadata', u'release-list', u'release',
-                    u'title')
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"")
-        self.assertEqual(xml.artist_name, u"Album Artist")
-        self.assertEqual(xml.year, u"2010")
-        self.assertEqual(xml.catalog, u"cat#")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(xml.get_track(0),
-                         (u"Track 1", u"", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"Track 2", u"Track Artist", u""))
-        self.assertEqual(xml.get_track(2),
-                         (u"Track 3", u"", u""))
-
-        #removing <artist>
-        xml_dom = parseString(xml_data)
-        remove_node(xml_dom, u'metadata', u'release-list', u'release',
-                    u'artist')
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"")
-        self.assertEqual(xml.year, u"2010")
-        self.assertEqual(xml.catalog, u"cat#")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(xml.get_track(0),
-                         (u"Track 1", u"", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"Track 2", u"Track Artist", u""))
-        self.assertEqual(xml.get_track(2),
-                         (u"Track 3", u"", u""))
-
-        #removing <artist> -> <name>
-        xml_dom = parseString(xml_data)
-        remove_node(xml_dom, u'metadata', u'release-list', u'release',
-                    u'artist', u'name')
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"")
-        self.assertEqual(xml.year, u"2010")
-        self.assertEqual(xml.catalog, u"cat#")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(xml.get_track(0),
-                         (u"Track 1", u"", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"Track 2", u"Track Artist", u""))
-        self.assertEqual(xml.get_track(2),
-                         (u"Track 3", u"", u""))
-
-        #removing <release-event-list>
-        xml_dom = parseString(xml_data)
-        remove_node(xml_dom, u'metadata', u'release-list', u'release',
-                    u'release-event-list')
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"Album Artist")
-        self.assertEqual(xml.year, u"")
-        self.assertEqual(xml.catalog, u"")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(xml.get_track(0),
-                         (u"Track 1", u"", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"Track 2", u"Track Artist", u""))
-        self.assertEqual(xml.get_track(2),
-                         (u"Track 3", u"", u""))
-
-        #removing <release-event-list> -> <event>
-        xml_dom = parseString(xml_data)
-        remove_node(xml_dom, u'metadata', u'release-list', u'release',
-                    u'release-event-list', u'event')
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"Album Artist")
-        self.assertEqual(xml.year, u"")
-        self.assertEqual(xml.catalog, u"")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(xml.get_track(0),
-                         (u"Track 1", u"", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"Track 2", u"Track Artist", u""))
-        self.assertEqual(xml.get_track(2),
-                         (u"Track 3", u"", u""))
-
-        #removing <track-list>
-        xml_dom = parseString(xml_data)
-        remove_node(xml_dom, u'metadata', u'release-list', u'release',
-                    u'track-list')
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"Album Artist")
-        self.assertEqual(xml.year, u"2010")
-        self.assertEqual(xml.catalog, u"cat#")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(len(xml), 0)
-
-        #removing <track> (1)
-        xml_dom = parseString(xml_data)
-        track_list = audiotools.walk_xml_tree(xml_dom, u'metadata',
-                                              u'release-list', u'release',
-                                              u'track-list')
-        self.assertEqual(track_list.tagName, u'track-list')
-        track_list.removeChild(track_list.childNodes[0])
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"Album Artist")
-        self.assertEqual(xml.year, u"2010")
-        self.assertEqual(xml.catalog, u"cat#")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(len(xml), 2)
-        self.assertEqual(xml.get_track(0),
-                         (u"Track 2", u"Track Artist", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"Track 3", u"", u""))
-
-        #removing <track> (1) -> <title>
-        xml_dom = parseString(xml_data)
-        track_list = audiotools.walk_xml_tree(xml_dom, u'metadata',
-                                              u'release-list', u'release',
-                                              u'track-list')
-        self.assertEqual(track_list.tagName, u'track-list')
-        remove_node(track_list.childNodes[0], u'title')
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"Album Artist")
-        self.assertEqual(xml.year, u"2010")
-        self.assertEqual(xml.catalog, u"cat#")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(len(xml), 3)
-        self.assertEqual(xml.get_track(0),
-                         (u"", u"", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"Track 2", u"Track Artist", u""))
-        self.assertEqual(xml.get_track(2),
-                         (u"Track 3", u"", u""))
-
-        #removing <track> (2)
-        xml_dom = parseString(xml_data)
-        track_list = audiotools.walk_xml_tree(xml_dom, u'metadata',
-                                              u'release-list', u'release',
-                                              u'track-list')
-        self.assertEqual(track_list.tagName, u'track-list')
-        track_list.removeChild(track_list.childNodes[1])
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"Album Artist")
-        self.assertEqual(xml.year, u"2010")
-        self.assertEqual(xml.catalog, u"cat#")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(len(xml), 2)
-        self.assertEqual(xml.get_track(0),
-                         (u"Track 1", u"", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"Track 3", u"", u""))
-
-        #removing <track> (2) -> <title>
-        xml_dom = parseString(xml_data)
-        track_list = audiotools.walk_xml_tree(xml_dom, u'metadata',
-                                              u'release-list', u'release',
-                                              u'track-list')
-        self.assertEqual(track_list.tagName, u'track-list')
-        remove_node(track_list.childNodes[1], u'title')
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"Album Artist")
-        self.assertEqual(xml.year, u"2010")
-        self.assertEqual(xml.catalog, u"cat#")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(len(xml), 3)
-        self.assertEqual(xml.get_track(0),
-                         (u"Track 1", u"", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"", u"Track Artist", u""))
-        self.assertEqual(xml.get_track(2),
-                         (u"Track 3", u"", u""))
-
-        #removing <track> (2) -> <artist>
-        xml_dom = parseString(xml_data)
-        track_list = audiotools.walk_xml_tree(xml_dom, u'metadata',
-                                              u'release-list', u'release',
-                                              u'track-list')
-        self.assertEqual(track_list.tagName, u'track-list')
-        remove_node(track_list.childNodes[1], u'artist')
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"Album Artist")
-        self.assertEqual(xml.year, u"2010")
-        self.assertEqual(xml.catalog, u"cat#")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(len(xml), 3)
-        self.assertEqual(xml.get_track(0),
-                         (u"Track 1", u"", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"Track 2", u"", u""))
-        self.assertEqual(xml.get_track(2),
-                         (u"Track 3", u"", u""))
-
-        #removing <track> (2) -> <artist> -> <name>
-        xml_dom = parseString(xml_data)
-        track_list = audiotools.walk_xml_tree(xml_dom, u'metadata',
-                                              u'release-list', u'release',
-                                              u'track-list')
-        self.assertEqual(track_list.tagName, u'track-list')
-        remove_node(track_list.childNodes[1], u'artist', u'name')
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"Album Artist")
-        self.assertEqual(xml.year, u"2010")
-        self.assertEqual(xml.catalog, u"cat#")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(len(xml), 3)
-        self.assertEqual(xml.get_track(0),
-                         (u"Track 1", u"", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"Track 2", u"", u""))
-        self.assertEqual(xml.get_track(2),
-                         (u"Track 3", u"", u""))
-
-        #removing <track> (3)
-        xml_dom = parseString(xml_data)
-        track_list = audiotools.walk_xml_tree(xml_dom, u'metadata',
-                                              u'release-list', u'release',
-                                              u'track-list')
-        self.assertEqual(track_list.tagName, u'track-list')
-        track_list.removeChild(track_list.childNodes[2])
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"Album Artist")
-        self.assertEqual(xml.year, u"2010")
-        self.assertEqual(xml.catalog, u"cat#")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(len(xml), 2)
-        self.assertEqual(xml.get_track(0),
-                         (u"Track 1", u"", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"Track 2", u"Track Artist", u""))
-
-        #removing <track> (3) -> <title>
-        xml_dom = parseString(xml_data)
-        track_list = audiotools.walk_xml_tree(xml_dom, u'metadata',
-                                              u'release-list', u'release',
-                                              u'track-list')
-        self.assertEqual(track_list.tagName, u'track-list')
-        remove_node(track_list.childNodes[2], u'title')
-        xml = audiotools.MusicBrainzReleaseXML(xml_dom)
-        self.assertEqual(xml.album_name, u"Album Name")
-        self.assertEqual(xml.artist_name, u"Album Artist")
-        self.assertEqual(xml.year, u"2010")
-        self.assertEqual(xml.catalog, u"cat#")
-        self.assertEqual(xml.extra, u"")
-        self.assertEqual(len(xml), 3)
-        self.assertEqual(xml.get_track(0),
-                         (u"Track 1", u"", u""))
-        self.assertEqual(xml.get_track(1),
-                         (u"Track 2", u"Track Artist", u""))
-        self.assertEqual(xml.get_track(2),
-                         (u"", u"", u""))
-
-
-    @LIB_CORE
-    def test_metadata(self):
-        xml = audiotools.MusicBrainzReleaseXML.from_string(
-            """<?xml version="1.0" encoding="utf-8"?><metadata xmlns="http://musicbrainz.org/ns/mmd-1.0#" xmlns:ext="http://musicbrainz.org/ns/ext-1.0#"><release-list><release><title>Album Name</title><artist><name>Album Artist</name></artist><release-event-list><event date="2010"/></release-event-list><track-list><track><title>Track 1</title><duration>272000</duration></track><track><title>Track 2</title><duration>426333</duration></track><track><title>Track 3</title><duration>249560</duration></track></track-list></release></release-list></metadata>""")
-
-        self.assertEqual(xml.metadata(),
-                         audiotools.MetaData(artist_name=u"Album Artist",
-                                             album_name=u"Album Name",
-                                             track_total=3,
-                                             year=u"2010"))
 
 class testcuesheet(unittest.TestCase):
     @LIB_CORE
@@ -4155,7 +3883,8 @@ IqWzFUixmyqeumDRdlhpO+C2s3Eocdn5wUixIZt3KdoOK20HindxcShxI3mX+IDg3b8MLEoQ6yTo
                               (200347, ), (204985, ), (227336, ),
                               (243382, 243549), (265893,  266032),
                               (292606, 292942), (302893, 303123), (321611, )])
-            self.assertEqual(list(sheet.pcm_lengths(191795016)),
+            self.assertEqual(list(sheet.pcm_lengths(191795016,
+                                                    44100)),
                              [12280380, 12657288, 4152456, 1929228,
                               9938376, 15153936, 13525176, 10900344,
                               940212, 10492860, 7321776, 11084976,
@@ -4181,8 +3910,10 @@ IqWzFUixmyqeumDRdlhpO+C2s3Eocdn5wUixIZt3KdoOK20HindxcShxI3mX+IDg3b8MLEoQ6yTo
                 self.assertEqual(sheet.catalog(), cue_sheet.catalog())
                 self.assertEqual(list(sheet.indexes()),
                                  list(cue_sheet.indexes()))
-                self.assertEqual(list(sheet.pcm_lengths(191795016)),
-                                 list(cue_sheet.pcm_lengths(191795016)))
+                self.assertEqual(list(sheet.pcm_lengths(191795016,
+                                                        44100)),
+                                 list(cue_sheet.pcm_lengths(191795016,
+                                                            44100)))
                 self.assertEqual(sorted(sheet.ISRCs().items()),
                                  sorted(cue_sheet.ISRCs().items()))
             finally:
@@ -4200,8 +3931,10 @@ IqWzFUixmyqeumDRdlhpO+C2s3Eocdn5wUixIZt3KdoOK20HindxcShxI3mX+IDg3b8MLEoQ6yTo
                 self.assertEqual(sheet.catalog(), toc_sheet.catalog())
                 self.assertEqual(list(sheet.indexes()),
                                  list(toc_sheet.indexes()))
-                self.assertEqual(list(sheet.pcm_lengths(191795016)),
-                                 list(toc_sheet.pcm_lengths(191795016)))
+                self.assertEqual(list(sheet.pcm_lengths(191795016,
+                                                        44100)),
+                                 list(toc_sheet.pcm_lengths(191795016,
+                                                            44100)))
                 self.assertEqual(sorted(sheet.ISRCs().items()),
                                  sorted(toc_sheet.ISRCs().items()))
             finally:
@@ -4224,8 +3957,10 @@ IqWzFUixmyqeumDRdlhpO+C2s3Eocdn5wUixIZt3KdoOK20HindxcShxI3mX+IDg3b8MLEoQ6yTo
                     self.assertEqual(sheet.catalog(), f_sheet.catalog())
                     self.assertEqual(list(sheet.indexes()),
                                      list(f_sheet.indexes()))
-                    self.assertEqual(list(sheet.pcm_lengths(191795016)),
-                                     list(f_sheet.pcm_lengths(191795016)))
+                    self.assertEqual(list(sheet.pcm_lengths(191795016,
+                                                            44100)),
+                                     list(f_sheet.pcm_lengths(191795016,
+                                                              44100)))
                     self.assertEqual(sorted(sheet.ISRCs().items()),
                                      sorted(f_sheet.ISRCs().items()))
                 finally:
@@ -4269,158 +4004,183 @@ c0X3z/cu+lUE0ySfNZ5QgQgq82S0R8+9OWBChth3PkyTfJaJC/a+3YCk97Xn+b7/NdBFv1thmjB0
 class testflaccuesheet(testcuesheet):
     @LIB_CORE
     def setUp(self):
-        self.sheet_class = audiotools.FlacCueSheet
+        self.sheet_class = audiotools.flac.Flac_CUESHEET
         self.suffix = '.flac'
         self.test_sheets = [
-            Con.Container(catalog_number='4580226563955\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-                      cuesheet_tracks=[
-                    Con.Container(ISRC='JPG750800183',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=1,
-                              track_offset=0),
-                    Con.Container(ISRC='JPG750800212',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=2,
-                              track_offset=12280380),
-                    Con.Container(ISRC='JPG750800214',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=0), Con.Container(offset=130536, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=3,
-                              track_offset=24807132),
-                    Con.Container(ISRC='JPG750800704',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=0), Con.Container(offset=135828, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=4,
-                              track_offset=28954296),
-                    Con.Container(ISRC='JPG750800705',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=5,
-                              track_offset=31019352),
-                    Con.Container(ISRC='JPG750800706',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=6,
-                              track_offset=40957728),
-                    Con.Container(ISRC='JPG750800707',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=7,
-                              track_offset=56111664),
-                    Con.Container(ISRC='JPG750800708',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=0),
-                                                      Con.Container(offset=93492, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=8,
-                              track_offset=69543348),
-                    Con.Container(ISRC='JPG750800219',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=9,
-                              track_offset=80537184),
-                    Con.Container(ISRC='JPG750800722',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=0),
-                                                      Con.Container(offset=78792, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=10,
-                              track_offset=81398604),
-                    Con.Container(ISRC='JPG750800709',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=11,
-                              track_offset=91970256),
-                    Con.Container(ISRC='JPG750800290',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=12,
-                              track_offset=99292032),
-                    Con.Container(ISRC='JPG750800218',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=13,
-                              track_offset=110377008),
-                    Con.Container(ISRC='JPG750800710',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=0),
-                                                      Con.Container(offset=75264, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=14,
-                              track_offset=113040060),
-                    Con.Container(ISRC='JPG750800217',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=15,
-                              track_offset=117804036),
-                    Con.Container(ISRC='JPG750800531',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=16,
-                              track_offset=120531180),
-                    Con.Container(ISRC='JPG750800225',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=17,
-                              track_offset=133673568),
-                    Con.Container(ISRC='JPG750800711',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=0),
-                                                      Con.Container(offset=98196, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=18,
-                              track_offset=143108616),
-                    Con.Container(ISRC='JPG750800180',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=0),
-                                                      Con.Container(offset=81732, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=19,
-                              track_offset=156345084),
-                    Con.Container(ISRC='JPG750800712',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=0),
-                                                      Con.Container(offset=197568, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=20,
-                              track_offset=172052328),
-                    Con.Container(ISRC='JPG750800713',
-                              cuesheet_track_index=[
-                            Con.Container(offset=0, point_number=0),
-                            Con.Container(offset=135240, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=21,
-                              track_offset=178101084),
-                    Con.Container(ISRC='JPG750800714',
-                              cuesheet_track_index=[Con.Container(offset=0, point_number=1)],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=22,
-                              track_offset=189107268),
-                    Con.Container(ISRC='\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
-                              cuesheet_track_index=[],
-                              non_audio=False,
-                              pre_emphasis=False,
-                              track_number=170,
-                              track_offset=191795016)],
-                      is_cd=True, lead_in_samples=88200)]
+            audiotools.flac.Flac_CUESHEET(
+                catalog_number='4580226563955\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+                lead_in_samples=88200,
+                is_cdda=1,
+                tracks=[audiotools.flac.Flac_CUESHEET_track(
+                        offset=0,
+                        number=1,
+                        ISRC='JPG750800183',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=12280380,
+                        number=2,
+                        ISRC='JPG750800212',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=24807132,
+                        number=3,
+                        ISRC='JPG750800214',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 0),
+                                      audiotools.flac.Flac_CUESHEET_index(130536, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=28954296,
+                        number=4,
+                        ISRC='JPG750800704',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 0),
+                                      audiotools.flac.Flac_CUESHEET_index(135828, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=31019352,
+                        number=5,
+                        ISRC='JPG750800705',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=40957728,
+                        number=6,
+                        ISRC='JPG750800706',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=56111664,
+                        number=7,
+                        ISRC='JPG750800707',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=69543348,
+                        number=8,
+                        ISRC='JPG750800708',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 0),
+                                      audiotools.flac.Flac_CUESHEET_index(93492, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=80537184,
+                        number=9,
+                        ISRC='JPG750800219',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=81398604,
+                        number=10,
+                        ISRC='JPG750800722',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 0),
+                                      audiotools.flac.Flac_CUESHEET_index(78792, 1)]),
+                                                audiotools.flac.Flac_CUESHEET_track(
+                        offset=91970256,
+                        number=11,
+                        ISRC='JPG750800709',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=99292032,
+                        number=12,
+                        ISRC='JPG750800290',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=110377008,
+                        number=13,
+                        ISRC='JPG750800218',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=113040060,
+                        number=14,
+                        ISRC='JPG750800710',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 0),
+                                      audiotools.flac.Flac_CUESHEET_index(75264, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=117804036,
+                        number=15,
+                        ISRC='JPG750800217',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=120531180,
+                        number=16,
+                        ISRC='JPG750800531',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=133673568,
+                        number=17,
+                        ISRC='JPG750800225',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=143108616,
+                        number=18,
+                        ISRC='JPG750800711',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 0),
+                                      audiotools.flac.Flac_CUESHEET_index(98196, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=156345084,
+                        number=19,
+                        ISRC='JPG750800180',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 0),
+                                      audiotools.flac.Flac_CUESHEET_index(81732, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=172052328,
+                        number=20,
+                        ISRC='JPG750800712',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 0),
+                                      audiotools.flac.Flac_CUESHEET_index(197568, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=178101084,
+                        number=21,
+                        ISRC='JPG750800713',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 0),
+                                      audiotools.flac.Flac_CUESHEET_index(135240, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=189107268,
+                        number=22,
+                        ISRC='JPG750800714',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[audiotools.flac.Flac_CUESHEET_index(0, 1)]),
+                        audiotools.flac.Flac_CUESHEET_track(
+                        offset=191795016,
+                        number=170,
+                        ISRC='\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+                        track_type=0,
+                        pre_emphasis=0,
+                        index_points=[])])]
 
     def sheets(self):
         for test_sheet in self.test_sheets:
@@ -4431,10 +4191,16 @@ class testflaccuesheet(testcuesheet):
                     EXACT_BLANK_PCM_Reader(191795016),
                     "1")
                 metadata = tempflac.get_metadata()
-                metadata.cuesheet = audiotools.FlacCueSheet(test_sheet)
-                tempflac.set_metadata(metadata)
+                metadata.replace_blocks(
+                    audiotools.flac.Flac_CUESHEET.BLOCK_ID,
+                    [audiotools.flac.Flac_CUESHEET.converted(
+                            test_sheet,
+                            191795016)])
+                tempflac.update_metadata(metadata)
 
-                sheet = audiotools.open(tempflacfile.name).get_metadata().cuesheet
+                sheet = audiotools.open(
+                    tempflacfile.name).get_metadata().get_block(
+                    audiotools.flac.Flac_CUESHEET.BLOCK_ID)
             finally:
                 tempflacfile.close()
             yield sheet
@@ -4449,14 +4215,13 @@ class PCM_Reader_Multiplexer:
         self.channel_mask = channel_mask
         self.bits_per_sample = pcm_readers[0].bits_per_sample
 
-    def read(self, bytes):
+    def read(self, pcm_frames):
         return audiotools.pcm.from_channels(
-            [reader.read(bytes) for reader in self.buffers])
+            [reader.read(pcm_frames) for reader in self.buffers])
 
     def close(self):
         for reader in self.buffers:
             reader.close()
-
 
 
 class TestMultiChannel(unittest.TestCase):
@@ -4469,11 +4234,12 @@ class TestMultiChannel(unittest.TestCase):
         self.flac_channel_masks = [audiotools.FlacAudio,
                                    audiotools.OggFlacAudio]
 
-        if (audiotools.M4AAudio_nero.has_binaries(audiotools.BIN)):
-            self.flac_channel_masks.append(audiotools.M4AAudio_nero)
+        if (audiotools.m4a.M4AAudio_nero.has_binaries(audiotools.BIN)):
+            self.flac_channel_masks.append(audiotools.m4a.M4AAudio_nero)
 
         #these support a reordered subset of ChannelMasks up to 8 channels
-        self.vorbis_channel_masks = [audiotools.VorbisAudio]
+        self.vorbis_channel_masks = [audiotools.VorbisAudio,
+                                     audiotools.OpusAudio]
 
     def __test_mask_blank__(self, audio_class, channel_mask):
         temp_file = tempfile.NamedTemporaryFile(suffix="." + audio_class.SUFFIX)
@@ -4484,7 +4250,11 @@ class TestMultiChannel(unittest.TestCase):
                     [BLANK_PCM_Reader(2, channels=1)
                      for i in xrange(len(channel_mask))],
                     channel_mask))
-            self.assertEqual(temp_track.channel_mask(), channel_mask)
+            self.assertEqual(temp_track.channel_mask(), channel_mask,
+                             "%s != %s for format %s" %
+                             (temp_track.channel_mask(),
+                              channel_mask,
+                              audio_class.NAME))
 
             pcm = temp_track.to_pcm()
             self.assertEqual(int(pcm.channel_mask), int(channel_mask))
@@ -4511,7 +4281,11 @@ class TestMultiChannel(unittest.TestCase):
                 audiotools.transfer_framelist_data(pcm, lambda x: x)
                 pcm.close()
             else:
-                self.assertNotEqual(int(temp_track.channel_mask()), 0)
+                self.assertNotEqual(int(temp_track.channel_mask()), 0,
+                                    "mask = %s for format %s at %d channels" %
+                                    (temp_track.channel_mask(),
+                                     audio_class,
+                                     channels))
                 pcm = temp_track.to_pcm()
                 self.assertEqual(int(pcm.channel_mask),
                                  int(temp_track.channel_mask()))
@@ -4601,29 +4375,28 @@ class TestMultiChannel(unittest.TestCase):
 
         self.assertEqual(len(tone_tracks), len(channel_mask))
         temp_file = tempfile.NamedTemporaryFile(suffix="." + audio_class.SUFFIX)
-        gain_calcs = [replaygain.ReplayGain(44100) for t in tone_tracks]
         try:
             temp_track = audio_class.from_pcm(
                 temp_file.name,
                 PCM_Reader_Multiplexer([t.to_pcm() for t in tone_tracks],
                                        channel_mask))
 
-            pcm = temp_track.to_pcm()
-            frame = pcm.read(audiotools.BUFFER_SIZE)
-            while (len(frame) > 0):
-                for c in xrange(frame.channels):
-                    gain_calcs[c].update(frame.channel(c))
-                frame = pcm.read(audiotools.BUFFER_SIZE)
-            pcm.close()
+            gain_values = [
+                replaygain.ReplayGain(temp_track.sample_rate()).title_gain(
+                    audiotools.RemaskedPCMReader(temp_track.to_pcm(),
+                                                 1,
+                                                 mask))[0]
+                           for mask in
+                           [int(audiotools.ChannelMask.from_fields(
+                            **{channel_name:True}))
+                            for channel_name in
+                            channel_mask.channels()]]
 
             self.assertEqual(set([True]),
                              set([prev.replay_gain().track_gain >
                                   curr.replay_gain().track_gain
                                   for (prev, curr) in
                                   zip(tone_tracks, tone_tracks[1:])]))
-
-            gain_values = [gain_calc.title_gain()[0]
-                           for gain_calc in gain_calcs]
 
             self.assertEqual(set([True]),
                              set([prev > curr for (prev, curr) in
@@ -4686,15 +4459,6 @@ class TestMultiChannel(unittest.TestCase):
                                      back_left=True, back_right=True,
                                      front_center=True, back_center=True)]:
                 self.__test_mask_blank__(audio_class, mask)
-
-        for mask in [from_fields(front_center=True),
-                     from_fields(front_left=True, front_right=True),
-                     from_fields(front_left=True, front_right=True,
-                                 back_left=True, back_right=True),
-                     from_fields(front_left=True, side_left=True,
-                                 front_center=True, front_right=True,
-                                 side_right=True, back_center=True)]:
-            self.__test_mask_blank__(audiotools.AiffAudio, mask)
 
     @LIB_CORE
     def test_channel_mask_conversion(self):
@@ -4769,18 +4533,6 @@ class TestMultiChannel(unittest.TestCase):
                                                  target_audio_class,
                                                  mask)
 
-        for target_audio_class in self.wav_channel_masks:
-            for mask in [from_fields(front_center=True),
-                         from_fields(front_left=True, front_right=True),
-                         from_fields(front_left=True, front_right=True,
-                                     back_left=True, back_right=True),
-                         from_fields(front_left=True, side_left=True,
-                                     front_center=True, front_right=True,
-                                     side_right=True, back_center=True)]:
-                self.__test_pcm_conversion__(audiotools.AiffAudio,
-                                             target_audio_class,
-                                             mask)
-
     @LIB_CORE
     def test_channel_assignment(self):
         from_fields = audiotools.ChannelMask.from_fields
@@ -4823,7 +4575,7 @@ class TestMultiChannel(unittest.TestCase):
                 #This is likely due to the characteristics of
                 #my input samples.
                 if ((len(mask) == 6) and
-                    ((audio_class is audiotools.M4AAudio_nero) or
+                    ((audio_class is audiotools.m4a.M4AAudio_nero) or
                      (audio_class is audiotools.VorbisAudio))):
                     continue
 
@@ -4854,27 +4606,22 @@ class TestMultiChannel(unittest.TestCase):
                                          TONE_TRACKS[0:len(mask)],
                                          mask)
 
-        for mask in [from_fields(front_left=True, front_right=True),
-                     from_fields(front_left=True, front_right=True,
-                                 back_left=True, back_right=True),
-                     from_fields(front_left=True, side_left=True,
-                                 front_center=True, front_right=True,
-                                 side_right=True, back_center=True)]:
-            self.__test_assignment__(audiotools.AiffAudio,
-                                     TONE_TRACKS[0:len(mask)],
-                                     mask)
+        # for mask in [from_fields(front_left=True, front_right=True),
+        #              from_fields(front_left=True, front_right=True,
+        #                          back_left=True, back_right=True),
+        #              from_fields(front_left=True, side_left=True,
+        #                          front_center=True, front_right=True,
+        #                          side_right=True, back_center=True)]:
+        #     self.__test_assignment__(audiotools.AiffAudio,
+        #                              TONE_TRACKS[0:len(mask)],
+        #                              mask)
 
     @LIB_CORE
     def test_unsupported_channel_mask_from_pcm(self):
-        for channels in xrange(1, 19):
+        for channels in xrange(1, 6 + 1):
             self.__test_undefined_mask_blank__(audiotools.WaveAudio,
                                                channels,
                                                False)
-            self.__test_error_mask_blank__(audiotools.WaveAudio,
-                                           19, audiotools.ChannelMask(0))
-            self.__test_error_mask_blank__(audiotools.WaveAudio,
-                                           20, audiotools.ChannelMask(0))
-
         for channels in xrange(1, 3):
             self.__test_undefined_mask_blank__(audiotools.WavPackAudio,
                                                channels,
@@ -4884,11 +4631,11 @@ class TestMultiChannel(unittest.TestCase):
                                                channels,
                                                True)
 
-        for channels in xrange(1, 3):
+        for channels in xrange(1, 9):
             self.__test_undefined_mask_blank__(audiotools.ALACAudio,
                                                channels,
                                                False)
-        for channels in xrange(3, 21):
+        for channels in xrange(9, 21):
             self.__test_undefined_mask_blank__(audiotools.ALACAudio,
                                                channels,
                                                True)
@@ -4909,9 +4656,7 @@ class TestMultiChannel(unittest.TestCase):
 
         for stereo_audio_class in [audiotools.MP3Audio,
                                    audiotools.MP2Audio,
-                                   audiotools.SpeexAudio,
-                                   audiotools.AACAudio,
-                                   audiotools.M4AAudio_faac]:
+                                   audiotools.m4a.M4AAudio_faac]:
 
             self.__test_undefined_mask_blank__(stereo_audio_class,
                                                2, False)
@@ -4946,12 +4691,12 @@ class TestMultiChannel(unittest.TestCase):
                                                channels,
                                                True)
 
-        for channels in [1, 2, 3, 4, 6]:
+        for channels in [1, 2]:
             self.__test_undefined_mask_blank__(audiotools.AiffAudio,
                                                channels,
                                                False)
 
-        for channels in [5, 7, 8, 9, 10]:
+        for channels in [3, 4, 5, 6, 7, 8, 9, 10]:
             self.__test_undefined_mask_blank__(audiotools.AiffAudio,
                                                channels,
                                                True)
@@ -4965,11 +4710,12 @@ class TestMultiChannel(unittest.TestCase):
                                                channels,
                                                True)
 
-        if (audiotools.M4AAudio_nero.has_binaries(audiotools.BIN)):
+        if (audiotools.m4a.M4AAudio_nero.has_binaries(audiotools.BIN)):
             for channels in xrange(1, 7):
-                self.__test_undefined_mask_blank__(audiotools.M4AAudio_nero,
+                self.__test_undefined_mask_blank__(audiotools.m4a.M4AAudio_nero,
                                                    channels,
                                                    False)
+
 
 class __callback__:
     def __init__(self):
@@ -4977,6 +4723,7 @@ class __callback__:
 
     def call(self):
         self.called = True
+
 
 class Test_Player(unittest.TestCase):
     @LIB_PLAYER
@@ -5027,6 +4774,8 @@ class Test_Player(unittest.TestCase):
         player.play()
         time.sleep(6)
         self.assertEqual(callback.called, True)
+        player.close()
+
 
 class Test_CDPlayer(unittest.TestCase):
     @LIB_PLAYER
@@ -5095,3 +4844,4 @@ class Test_CDPlayer(unittest.TestCase):
         player.play()
         time.sleep(6)
         self.assertEqual(callback.called, True)
+        player.close()

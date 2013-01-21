@@ -4,7 +4,7 @@
 
 /********************************************************
  Audio Tools, a module and set of tools for manipulating audio data
- Copyright (C) 2007-2011  Brian Langenberger
+ Copyright (C) 2007-2012  Brian Langenberger
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -36,7 +36,10 @@ typedef struct {
     double theta1;
     double theta2;
 
-    struct ia_array buffer;
+    int closed;
+
+    array_ia* buffer;
+    PyObject* audiotools_pcm;
 } decoders_Sine_Mono;
 
 int
@@ -150,7 +153,10 @@ typedef struct {
     double theta2;
     double fmult;
 
-    struct ia_array buffer;
+    int closed;
+
+    array_ia* buffer;
+    PyObject* audiotools_pcm;
 } decoders_Sine_Stereo;
 
 int
@@ -259,7 +265,10 @@ typedef struct {
     int max_value;
     int count;
 
-    struct ia_array buffer;
+    int closed;
+
+    array_ia* buffer;
+    PyObject* audiotools_pcm;
 } decoders_Sine_Simple;
 
 int

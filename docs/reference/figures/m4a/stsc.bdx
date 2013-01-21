@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<diagram>
+  <row>
+    <col start="0" end="31" width=".5">stsc length</col>
+    <col start="32" end="63" width=".5">`stsc' (0x73747363)</col>
+  </row>
+  <row>
+    <col start="64" end="71" width=".25">version</col>
+    <col start="72" end="95" width=".25">flags (0x000000)</col>
+    <col start="96" end="127" width=".5">number of blocks</col>
+  </row>
+  <row>
+    <col start="128" end="223" id="block" width=".25">Block₀</col>
+    <col start="224" end="319" width=".25">Block₁</col>
+    <col start="320" end="415" width=".25">Block₂</col>
+    <col style="dashed" width=".25">...</col>
+  </row>
+  <spacer/>
+  <row>
+    <col start="128" end="159" width=".333333"
+         id="block_s">first chunk</col>
+    <col start="160" end="191" width=".333333">samples per chunk</col>
+    <col start="192" end="223" width=".333333"
+         id="block_e">sample duration index</col>
+  </row>
+  <line style="dotted">
+    <start id="block" corner="sw"/>
+    <end id="block_s" corner="nw"/>
+  </line>
+  <line style="dotted">
+    <start id="block" corner="se"/>
+    <end id="block_e" corner="ne"/>
+  </line>
+</diagram>

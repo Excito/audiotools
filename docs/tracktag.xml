@@ -12,29 +12,23 @@
   </description>
   <options>
     <option short="h" long="help">show a list of options and exit</option>
-    <option short="V" long="verbose" arg="verbosity">
-      The level of output to display.
-      Choose between 'normal', 'quiet' and 'debug.
+    <option short="I" long="interactive">
+      Once any other command-line arguments are processed,
+      edit the given tracks in interactive mode.
     </option>
     <option short="r" long="replace">
       this options erases all existing metadata and replaces it
       with any specified values
     </option>
-    <option short="x" long="xmcd" arg="filename">
-      A MusicBrainz XML file or FreeDB XMCD file to use for track metadata.
-      XML and XMCD files can be obtained from the
-      track2xmcd(1), cd2xmcd(1), dvda2xmcd(1), and editxmcd(1) programs.
-    </option>
-    <option long="cue" arg="filename">
-      If given along with multiple audio tracks,
-      this file's ISRC metadata will be added to those tracks;
-      if given with a single CD image track, this file will
-      be embedded in that image.
-      Note that only FLAC and WavPack currently support embedded cuesheets
-      and not all CDs contain ISRC metadata.
-    </option>
     <option long="replay-gain">
       add ReplayGain metadata to tracks
+    </option>
+    <option short="j" long="joint" arg="processes">
+      The maximum number of albums to calculate ReplayGain for at one time.
+    </option>
+    <option short="V" long="verbose" arg="verbosity">
+      The level of output to display.
+      Choose between 'normal', 'quiet' and 'debug'.
     </option>
   </options>
   <options category="text">
@@ -97,30 +91,6 @@
       a file containing comment text, for particularly long comments
     </option>
   </options>
-  <options category="image">
-    <option long="remove-images">
-      remove existing images;
-      if new images are added, existing images will be removed beforehand
-    </option>
-    <option long="front-cover" arg="filename">
-      an image file of the album's front cover
-    </option>
-    <option long="back-cover" arg="filename">
-      an image file of the album's back cover
-    </option>
-    <option long="leaflet" arg="filename">
-      an image file of one of the album's leaflet pages
-    </option>
-    <option long="media" arg="filename">
-      an image file of the album's media
-    </option>
-    <option long="other-image" arg="filename">
-      an image file related to the album
-    </option>
-    <option long="thumbnail">
-      convert images to smaller thumbnails before adding
-    </option>
-  </options>
   <options category="removal">
     <option long="remove-name"/>
     <option long="remove-artist"/>
@@ -141,6 +111,34 @@
     <option long="remove-copyright"/>
     <option long="remove-comment"/>
   </options>
+  <options category="CD lookup">
+    <option short="M" long="metadata-lookup">
+      perform metadata lookup for tracks as if they were a single CD
+    </option>
+    <option long="musicbrainz-server" arg="hostname">
+      the MusicBrainz server name to query for metadata
+    </option>
+    <option long="musicbrainz-port" arg="port">
+      the MusicBrainz port to query for metadata
+    </option>
+    <option long="no-musicbrainz">
+      don't query MusicBrainz for metadata
+    </option>
+    <option long="freedb-server" arg="hostname">
+      the FreeDB server name to query for metadata
+    </option>
+    <option long="freedb-port" arg="port">
+      the FreeDB port to query for metadata
+    </option>
+    <option long="no-freedb">
+      don't query FreeDB for metadata
+    </option>
+    <option short="D" long="default">
+      When multiple metadata choices are available,
+      select the first one automatically.
+      This option has no effect when used with -I
+    </option>
+  </options>
   <examples>
     <example>
       <description>
@@ -149,16 +147,6 @@
       </description>
       <command>
         tracktag "--name=Test Track" --number=5 track.flac
-      </command>
-    </example>
-    <example>
-      <description>
-        Add several JPEG images to track.flac
-      </description>
-      <command>
-        tracktag --front-cover=front.jpg --back-cover=back.jpg
-        --leaflet=page1.jpg --leaflet=page2.jpg --leaflet=page3.jpg
-        track.flac
       </command>
     </example>
     <example>
