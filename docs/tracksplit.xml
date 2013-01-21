@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manpage>
+  <utility>tracksplit</utility>
+  <author>Brian Langenberger</author>
+  <section>1</section>
+  <name>split audio track</name>
+  <title>Audio File Splitter</title>
+  <synopsis>[OPTIONS] &lt;track 1&gt;</synopsis>
+  <description>
+    tracksplit splits an audio track into several smaller tracks.
+  </description>
+  <options>
+    <option short="h" long="help">show a list of options and exit</option>
+    <option short="V" long="verbose" arg="verbosity">
+      The level of output to display.
+      Choose between 'normal', 'quiet' and 'debug.
+    </option>
+    <option long="cue" arg="filename">
+      the cuesheet to use for splitting track
+    </option>
+  </options>
+  <options category="encoding">
+    <option short="t" long="type" arg="type">
+      The audio format to convert the split tracks to.
+      For a list of available audio formats, try: -t help.
+    </option>
+    <option short="q" long="quality" arg="quality">
+      The desired quality of the split tracks.
+      For a list of available quality modes for a given format, try: -q help
+    </option>
+    <option short="d" long="dir" arg="directory">
+      The target directory for the split tracks.
+      If none is given, the current working directory is used.
+      If the target directory does not exist,
+      it will be created automatically.
+    </option>
+    <option long="format" arg="string">
+      The format string to use for new filenames.
+      Template fields are replaced with metadata values when
+      new tracks are created.  All other text is left as-is.
+      If this option is omitted, a default format string is used.
+    </option>
+  </options>
+  <options category="metadata">
+    <option short="x" long="xmcd" arg="filename">
+      A MusicBrainz XML file or FreeDB XMCD file to use for metadata for
+      the split tracks.
+      If no file is given, metadata will be taken from the source
+      track, if present.
+      XML and XMCD files can be obtained from the
+      track2xmcd(1), cd2xmcd(1), dvda2xmcd(1), and editxmcd(1) programs.
+    </option>
+    <option long="replay-gain">
+      add ReplayGain metadata to newly created tracks
+    </option>
+    <option long="no-replay-gain">
+      do not add ReplayGain metadata to newly created tracks
+    </option>
+  </options>
+  <examples>
+    <example>
+      <description>
+        Split CDImage.wav into several WAVE files using the cuesheet
+        CDImage.cue:
+      </description>
+      <command>
+        tracksplit --cue=CDImage.cue CDImage.wav
+      </command>
+    </example>
+    <example>
+      <description>
+        Split album.flac into several FLAC files using
+        album.toc and metadata from album.xmcd:
+      </description>
+      <command>
+        tracksplit --cue=album.toc -x album.xmcd album.flac
+      </command>
+    </example>
+    <example>
+      <description>
+        Obtain CDImage.cue using the cdrdao(1) utilities:
+      </description>
+      <command>
+        cdrdao read-toc --device /dev/cdrom CDImage.toc
+      </command>
+      <command>
+        toc2cue CDImage.toc CDImage.cue
+      </command>
+    </example>
+  </examples>
+</manpage>

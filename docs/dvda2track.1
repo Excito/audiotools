@@ -1,0 +1,143 @@
+.TH "DVDA2TRACK" 1 "April 2011" "" "DVD-Audio Extractor"
+.SH NAME
+dvda2track \- extract audio files
+.SH SYNOPSIS
+dvda2track [OPTIONS] [track 1] [track 2] ...
+.SH DESCRIPTION
+.PP
+dvda2track extracts audio files from a DVD-Audio disc and encodes them to tracks. If track numbers are given, extracts only those tracks. Otherwise, extracts the entire disc.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show a list of options and exit
+.TP
+\fB\-V\fR, \fB\-\-verbose\fR=\fIVERBOSITY\fR
+The level of output to display. Choose between 'normal', 'quiet' and 'debug.
+.TP
+\fB\-c\fR, \fB\-\-cdrom\fR=\fICDROM\fR
+the DVD-ROM device to extract audio from
+.TP
+\fB\-A\fR, \fB\-\-audio_ts\fR=\fIDIRECTORY\fR
+the DVD-Audio's AUDIO_TS directory
+.TP
+\fB\-\-title\fR=\fINUMBER\fR
+the title number to retrieve tracks from, starting from 1; the number of titles can be determined from the dvdainfo(1) utility
+.SH EXTRACTION OPTIONS
+.TP
+\fB\-t\fR, \fB\-\-type\fR=\fITYPE\fR
+The audio format of the extracted audio tracks. For a list of available audio formats, try: -t help.
+.TP
+\fB\-q\fR, \fB\-\-quality\fR=\fIQUALITY\fR
+The desired quality of the extracted tracks. For a list of available quality modes for a given format, try: -q help
+.TP
+\fB\-d\fR, \fB\-\-dir\fR=\fIDIRECTORY\fR
+The target directory for the extracted tracks. If none is given, the current working directory is used. If the target directory does not exist, it will be created automatically.
+.TP
+\fB\-\-format\fR=\fISTRING\fR
+The format string to use for new filenames. Template fields are replaced with metadata values when new tracks are created. All other text is left as-is. If this option is omitted, a default format string is used.
+.SH METADATA OPTIONS
+.TP
+\fB\-x\fR, \fB\-\-xmcd\fR=\fIFILENAME\fR
+A MusicBrainz XML file or FreeDB XMCD file to use for metadata for the extracted tracks. XML and XMCD files can be obtained from the track2xmcd(1), cd2xmcd(1), dvda2xmcd(1), and editxmcd(1) programs.
+.TP
+\fB\-\-track\-start\fR=\fINUMBER\fR
+the starting track number of the title being extracted
+.TP
+\fB\-\-track\-total\fR=\fINUMBER\fR
+the total number of tracks, if the extracted title is only a subset of the actual number of tracks
+.TP
+\fB\-\-album\-number\fR=\fINUMBER\fR
+the album number of this disc, if it is one in a series of albums
+.TP
+\fB\-\-album\-total\fR=\fINUMBER\fR
+the total number of albums in this disc's set, if it is one in a series of albums
+.TP
+\fB\-\-replay\-gain\fR
+add ReplayGain metadata to newly created tracks
+.TP
+\fB\-\-no\-replay\-gain\fR
+do not add ReplayGain metadata to newly created tracks
+.SH ABOUT DVD ACCESS
+Some systems will spin-down a DVD if it has not been accessed for awhile, but will fail to bring it back up again if reads are requested. For example, one might use dvda2xmcd(1) to get a disc's metadata, then edit it with editxmcd(1). But while editing, the system spins down the DVD drive and subsequent calls to dvda2track(1) fail.
+.PP
+In this instance, one might have to reinsert the disc for it to be read properly.
+.PP
+.SH EXAMPLES
+.LP
+Extract all the tracks in title 1 from /dev/cdrom which is mounted at /media/cdrom/AUDIO_TS as FLAC files using metadata from album.xmcd
+.IP
+dvda2track -t flac -x album.xmcd -c /dev/cdrom -A /media/cdrom/AUDIO_TS
+
+.LP
+Sometimes a particularly long disc will split what should be a contiguous collection of tracks across more than one DVD-Audio title. For example, we may have a disc whose label indicates 30 tracks, but has placed 20 tracks in title 1 and 10 tracks in title 2 (according to dvdainfo(1)). In this instance, we can use the --title and --track-start options to extract them into a single collection.
+.LP
+Extract the first 20 tracks :
+
+.IP
+dvda2track -c /dev/cdrom -A /media/cdrom/AUDIO_TS --title=1 --track-total=30
+
+.LP
+Extract the final 10 tracks :
+
+.IP
+dvda2track -c /dev/cdrom -A /media/cdrom/AUDIO_TS --title=2 --track-start=21 --track-total=30
+
+.SH FORMAT STRING FIELDS
+.TS
+tab(:);
+| c   s |
+| c | c |
+| r | l |.
+_
+Template Fields
+Key:Value
+=
+\fC%(track_number)2.2d\fR:the track's number on the CD
+\fC%(track_total)d\fR:the total number of tracks on the CD
+\fC%(album_number)d\fR:the CD's album number
+\fC%(album_total)d\fR:the total number of CDs in the set
+\fC%(album_track_number)s\fR:combination of album and track number
+\fC%(track_name)s\fR:the track's name
+\fC%(album_name)s\fR:the album's name
+\fC%(artist_name)s\fR:the track's artist name
+\fC%(performer_name)s\fR:the track's performer name
+\fC%(composer_name)s\fR:the track's composer name
+\fC%(conductor_name)s\fR:the track's conductor name
+\fC%(media)s\fR:the track's source media
+\fC%(ISRC)s\fR:the track's ISRC
+\fC%(catalog)s\fR:the track's catalog number
+\fC%(copyright)s\fR:the track's copyright information
+\fC%(publisher)s\fR:the track's publisher
+\fC%(year)s\fR:the track's publication year
+\fC%(date)s\fR:the track's original recording date
+\fC%(suffix)s\fR:the track's suffix
+\fC%(basename)s\fR:the track's original name, without suffix
+_
+.TE
+.SH SEE ALSO
+.BR audiotools-config (1),
+.BR audiotools.cfg (5),
+.BR cd2track (1),
+.BR cd2xmcd (1),
+.BR cdinfo (1),
+.BR cdplay (1),
+.BR coverdump (1),
+.BR coverview (1),
+.BR dvda2xmcd (1),
+.BR dvdainfo (1),
+.BR editxmcd (1),
+.BR track2cd (1),
+.BR track2track (1),
+.BR track2xmcd (1),
+.BR trackcat (1),
+.BR trackcmp (1),
+.BR trackinfo (1),
+.BR tracklength (1),
+.BR tracklint (1),
+.BR trackplay (1),
+.BR trackrename (1),
+.BR tracksplit (1),
+.BR tracktag (1),
+.BR trackverify (1)
+.SH AUTHOR
+Brian Langenberger

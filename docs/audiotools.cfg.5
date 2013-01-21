@@ -1,0 +1,73 @@
+.TH "AUDIOTOOLS.CFG" 5 "April 2011" "" "Audio Tools Config File"
+.SH NAME
+audiotools.cfg \- configuration data for Python Audio Tools
+.SH DESCRIPTION
+.PP
+The format of this file consists of one or more sections. Each section contains one or more key / value pairs.
+.SH CONFIGURATION ITEMS
+.TS
+tab(:);
+l l l.
+\fBSection\fR:\fBKey\fR:\fBValue\fR
+_
+[System]:default_type:the default audio type to use
+\^:cdrom:the default CD-ROM device to use
+\^:cdrom_read_offset:read sample offset to apply
+\^:cdrom_write_offset:write sample offset to apply
+\^:fs_encoding:text encoding for filenames
+\^:io_encoding:text encoding for terminal output
+\^:maximum_jobs:default for the -j option
+_
+[Defaults]:verbosity:"normal", "debug" or "quiet"
+_
+[Filenames]:format:default for the --format option
+_
+[Quality]:flac:default quality for FLAC encoding
+\^:mp3:default quality for MP3 encoding
+\^:...:default quality for a given type
+_
+[Binaries]:oggenc:binary to use for Vorbis encoding
+\^:lame:binary to use for MP3 encoding
+\^:...:binary to use other than default
+_
+[Thumbnail]:format:"jpeg", "png", "gif", etc.
+\^:size:maximum size of each thumbnail
+_
+[ID3]:id3v2:id3v2.2, id3v2.3, id3v2.4 or none
+\^:id3v1:"id3v1.1" or "none"
+\^:pad:if "true", track numbers like "01"
+\^:\^:if "false", track numbers like "1"
+_
+[MusicBrainz]:server:default MusicBrainz hostname
+\^:port:default MusicBrainz port
+_
+[FreeDB]:server:default FreeDB hostname
+\^:port:default FreeDB port
+.TE
+.SH SEE ALSO
+.BR audiotools-config (1),
+.BR cd2track (1),
+.BR cd2xmcd (1),
+.BR cdinfo (1),
+.BR cdplay (1),
+.BR coverdump (1),
+.BR coverview (1),
+.BR dvda2track (1),
+.BR dvda2xmcd (1),
+.BR dvdainfo (1),
+.BR editxmcd (1),
+.BR track2cd (1),
+.BR track2track (1),
+.BR track2xmcd (1),
+.BR trackcat (1),
+.BR trackcmp (1),
+.BR trackinfo (1),
+.BR tracklength (1),
+.BR tracklint (1),
+.BR trackplay (1),
+.BR trackrename (1),
+.BR tracksplit (1),
+.BR tracktag (1),
+.BR trackverify (1)
+.SH AUTHOR
+Brian Langenberger

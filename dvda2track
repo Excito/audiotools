@@ -1,0 +1,405 @@
+#!/usr/bin/python
+
+#Audio Tools, a module and set of tools for manipulating audio data
+#Copyright (C) 2007-2011  Brian Langenberger
+
+#This program is free software; you can redistribute it and/or modify
+#it under the terms of the GNU General Public License as published by
+#the Free Software Foundation; either version 2 of the License, or
+#(at your option) any later version.
+
+#This program is distributed in the hope that it will be useful,
+#but WITHOUT ANY WARRANTY; without even the implied warranty of
+#MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#GNU General Public License for more details.
+
+#You should have received a copy of the GNU General Public License
+#along with this program; if not, write to the Free Software
+#Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
+
+import sys
+import os
+import audiotools
+import gettext
+import tempfile
+from itertools import izip
+from audiotools.decoders import MLPDecoder
+
+gettext.install("audiotools", unicode=True)
+
+
+class DummyTrack:
+    def __init__(self, sample_rate, channels, channel_mask, bits_per_sample):
+        self.__sample_rate__ = sample_rate
+        self.__channels__ = channels
+        self.__channel_mask__ = channel_mask
+        self.__bits_per_sample__ = bits_per_sample
+
+    def sample_rate(self):
+        return self.__sample_rate__
+
+    def channels(self):
+        return self.__channels__
+
+    def channel_mask(self):
+        return self.__channel_mask__
+
+    def bits_per_sample(self):
+        return self.__bits_per_sample__
+
+
+class AOBExtractor:
+    def __init__(self, title):
+        self.payloads = title.stream().packet_payloads()
+
+    def read(self, bytes):
+        try:
+            return self.payloads.next()
+        except StopIteration:
+            return ""
+
+    def close(self):
+        del(self.payloads)
+
+
+def pcm_split(reader, pcm_lengths):
+    """Yields a PCMReader object from reader for each pcm_length (in frames).
+
+    Each sub-reader is pcm_length PCM frames long with the same
+    channels, bits_per_sample, sample_rate and channel_mask
+    as the full stream.  reader is closed upon completion.
+    """
+
+    full_data = audiotools.BufferedPCMReader(reader)
+    for pcm_length in pcm_lengths:
+        yield audiotools.LimitedPCMReader(full_data, pcm_length)
+
+    full_data.close()
+
+
+if (__name__ == '__main__'):
+    parser = audiotools.OptionParser(
+        usage=_(u"%prog [options] [track #] [track #] ..."),
+        version="Python Audio Tools %s" % (audiotools.VERSION))
+
+    parser.add_option(
+        '-V', '--verbose',
+        action='store',
+        dest='verbosity',
+        choices=audiotools.VERBOSITY_LEVELS,
+        default=audiotools.DEFAULT_VERBOSITY,
+        help=_(u'the verbosity level to execute at'))
+
+    parser.add_option(
+        '-c', '--cdrom', action='store',
+        type='string', dest='cdrom',
+        default=audiotools.DEFAULT_CDROM)
+
+    parser.add_option('-A', '--audio-ts', action='store', default=None,
+                      type='string', dest='audio_ts', metavar='DIR',
+                      help='location of AUDIO_TS directory')
+
+    parser.add_option('--title', action='store', default=1,
+                      type='int', dest='title',
+                      help='DVD-Audio title number to extract tracks from')
+
+    conversion = audiotools.OptionGroup(parser, _(u"Extraction Options"))
+
+    conversion.add_option(
+        '-t', '--type',
+        action='store',
+        dest='type',
+        choices=audiotools.TYPE_MAP.keys(),
+        default=audiotools.DEFAULT_TYPE,
+        help=_(u'the type of audio track to create'))
+
+    conversion.add_option(
+        '-q', '--quality',
+        action='store',
+        type='string',
+        dest='quality',
+        help=_(u'the quality to store audio tracks at'))
+
+    conversion.add_option(
+        '-d', '--dir',
+        action='store',
+        type='string',
+        dest='dir',
+        default='.',
+        help=_(u"the directory to store extracted audio tracks"))
+
+    conversion.add_option(
+        '--format',
+        action='store',
+        type='string',
+        default=None,
+        dest='format',
+        help=_(u'the format string for new filenames'))
+
+    parser.add_option_group(conversion)
+
+    metadata = audiotools.OptionGroup(parser, _(u"Metadata Options"))
+
+    metadata.add_option(
+        '-x', '--xmcd',
+        action='store',
+        type='string',
+        dest='xmcd',
+        metavar='FILENAME',
+        help=_(u'FreeDB XMCD file or MusicBrainz XML file'))
+
+    metadata.add_option(
+        '--track-start',
+        action='store',
+        type='int',
+        dest='track_start',
+        default=1,
+        help=_(u'the starting track number of the title being extracted'))
+
+    metadata.add_option(
+        '--track-total',
+        action='store',
+        type='int',
+        dest='track_total',
+        default=None,
+        help=_(u'the total number of tracks, ' +
+               u'if the extracted title is only a subset'))
+
+    metadata.add_option(
+        '--album-number',
+        dest='album_number',
+        action='store',
+        type='int',
+        default=0,
+        help=_(u'the album number of this disc, ' +
+               u'if it is one of a series of albums'))
+
+    metadata.add_option(
+        '--album-total',
+        dest='album_total',
+        action='store',
+        type='int',
+        default=0,
+        help=_(u'the total albums of this disc\'s set, ' +
+               u'if it is one of a series of albums'))
+
+    #if adding ReplayGain is a lossless process
+    #(i.e. added as tags rather than modifying track data)
+    #add_replay_gain should default to True
+    #if not, add_replay_gain should default to False
+    #which is which depends on the track type
+    metadata.add_option(
+        '--replay-gain',
+        action='store_true',
+        dest='add_replay_gain',
+        help=_(u'add ReplayGain metadata to newly created tracks'))
+
+    metadata.add_option(
+        '--no-replay-gain',
+        action='store_false',
+        dest='add_replay_gain',
+        help=_(u'do not add ReplayGain metadata in newly created tracks'))
+
+    parser.add_option_group(metadata)
+
+    (options, args) = parser.parse_args()
+    msg = audiotools.Messenger("dvda2track", options)
+
+    #get the AudioFile class we are converted to
+    AudioType = audiotools.TYPE_MAP[options.type]
+
+    #ensure the selected compression is compatible with that class
+    if (options.quality == 'help'):
+        if (len(AudioType.COMPRESSION_MODES) > 1):
+            msg.info(_(u"Available compression types for %s:") % \
+                         (AudioType.NAME))
+            for mode in AudioType.COMPRESSION_MODES:
+                msg.new_row()
+                if (mode == audiotools.__default_quality__(AudioType.NAME)):
+                    msg.output_column(msg.ansi(mode.decode('ascii'),
+                                               [msg.BOLD,
+                                                msg.UNDERLINE]), True)
+                else:
+                    msg.output_column(mode.decode('ascii'), True)
+                if (mode in AudioType.COMPRESSION_DESCRIPTIONS):
+                    msg.output_column(u" : ")
+                else:
+                    msg.output_column(u"   ")
+                msg.output_column(
+                    AudioType.COMPRESSION_DESCRIPTIONS.get(mode, u""))
+            msg.output_rows()
+        else:
+            msg.error(_(u"Audio type %s has no compression modes") % \
+                          (AudioType.NAME))
+        sys.exit(0)
+    elif (options.quality is None):
+        options.quality = audiotools.__default_quality__(AudioType.NAME)
+    elif (options.quality not in AudioType.COMPRESSION_MODES):
+        msg.error(_(u"\"%(quality)s\" is not a supported " +
+                    u"compression mode for type \"%(type)s\"") % \
+                        {"quality": options.quality,
+                         "type": AudioType.NAME})
+        sys.exit(1)
+
+    #if we're using an XMCD file, use that file for MetaData
+    if (options.xmcd is not None):
+        try:
+            xmcd = audiotools.read_metadata_file(options.xmcd)
+        except audiotools.MetaDataFileException, err:
+            msg.error(unicode(err))
+            sys.exit(1)
+    else:
+        #if we're not using an XMCD file, no MetaData
+        xmcd = None
+
+    quality = options.quality
+    base_directory = options.dir
+
+    if (options.audio_ts is None):
+        msg.error(
+            _(u"You must specify the DVD-Audio's AUDIO_TS directory with -A"))
+        sys.exit(1)
+
+    try:
+        dvda = audiotools.DVDAudio(options.audio_ts, options.cdrom)
+    except audiotools.InvalidDVDA, err:
+        msg.error(unicode(err))
+        sys.exit(1)
+    except OSError, err:
+        msg.os_error(err)
+        sys.exit(1)
+
+    if (options.title < 1):
+        msg.error(_(u"title number must be greater than 0"))
+        sys.exit(1)
+    title = dvda[0][options.title - 1]
+
+    if (len(args) == 0):
+        to_rip = dict([(track.track, track) for track in title])
+    else:
+        to_rip = {}
+        for arg in args:
+            try:
+                to_rip[int(arg)] = title[int(arg)]
+            except IndexError:
+                continue
+            except ValueError:
+                continue
+
+    (sample_rate,
+     channels,
+     channel_mask,
+     bits_per_sample,
+     stream_type) = title.info()
+
+    #determine whether to add ReplayGain by default
+    if (options.add_replay_gain is None):
+        options.add_replay_gain = (
+            AudioType.lossless_replay_gain() and
+            audiotools.applicable_replay_gain(
+                [DummyTrack(sample_rate=sample_rate,
+                            channels=channels,
+                            channel_mask=channel_mask,
+                            bits_per_sample=bits_per_sample)]))
+
+    encoded = []
+
+    pcm_lengths = [(track.pts_length * sample_rate) /
+                   audiotools.DVDAudio.PTS_PER_SECOND for track in title]
+
+    for (i, (pcmreader,
+             pcm_frames)) in enumerate(izip(pcm_split(title.to_pcm(),
+                                                      pcm_lengths),
+                                            pcm_lengths)):
+        title_track_number = i + 1
+        logical_track_number = i + options.track_start
+        if (options.track_total is None):
+            track_total = len(title)
+        else:
+            track_total = options.track_total
+
+        if (title_track_number in to_rip.keys()):
+            dvda_track = to_rip[title_track_number]
+
+            basename = "track%2d%2.2d" % (options.album_number,
+                                          logical_track_number)
+
+            try:
+                if (xmcd is not None):  # we have metadata
+                    metadata = xmcd.get(dvda_track.track, None)
+                    if (metadata is not None):
+                        metadata.track_number = logical_track_number
+                        if (options.track_total is not None):
+                            metadata.track_total = options.track_total
+                        if (options.album_number != 0):
+                            metadata.album_number = options.album_number
+                        if (options.album_total != 0):
+                            metadata.album_total = options.album_total
+                else:                   # no metadata
+                    metadata = audiotools.MetaData(
+                        track_number=logical_track_number,
+                        track_total=track_total,
+                        album_number=options.album_number,
+                        album_total=options.album_total)
+
+                filename = os.path.join(
+                    base_directory,
+                    AudioType.track_name(file_path=basename,
+                                         track_metadata=metadata,
+                                         format=options.format))
+
+                audiotools.make_dirs(filename)
+
+                progress = audiotools.SingleProgressDisplay(
+                    msg, msg.filename(filename))
+
+                track = AudioType.from_pcm(
+                    filename,
+                    audiotools.PCMReaderProgress(pcmreader,
+                                                 pcm_frames,
+                                                 progress.update),
+                    quality)
+
+                track.set_metadata(metadata)
+                encoded.append(track)
+
+                progress.clear()
+
+                msg.info(
+                    _(u"title %(title_number)d - " +
+                      u"track %(track_number)2.2d -> %(filename)s") % \
+                        {"title_number": options.title,
+                         "track_number": title_track_number,
+                         "filename": msg.filename(track.filename)})
+            except audiotools.UnsupportedTracknameField, err:
+                err.error_msg(msg)
+                sys.exit(1)
+            except KeyError:
+                continue
+            except OSError, err:
+                msg.os_error(err)
+                sys.exit(1)
+            except audiotools.InvalidFormat, err:
+                msg.error(unicode(err))
+                sys.exit(1)
+            except audiotools.EncodingError, err:
+                msg.error(_(u"Unable to write \"%s\"") % \
+                              (msg.filename(filename)))
+                sys.exit(1)
+        else:
+            audiotools.transfer_framelist_data(pcmreader, lambda f: f)
+
+    if (options.add_replay_gain and AudioType.can_add_replay_gain()):
+        rg_progress = audiotools.ReplayGainProgressDisplay(
+            msg, AudioType.lossless_replay_gain())
+        rg_progress.initial_message()
+        try:
+            #all audio files must belong to the same album, by definition
+            AudioType.add_replay_gain([f.filename for f in encoded],
+                                      rg_progress.update)
+        except ValueError, err:
+            rg_progress.clear()
+            msg.error(unicode(err))
+            sys.exit(1)
+        rg_progress.final_message()
