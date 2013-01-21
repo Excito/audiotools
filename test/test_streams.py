@@ -14,7 +14,7 @@ from audiotools.decoders import Sine_Mono, Sine_Stereo, Sine_Simple
 
 class FrameListReader:
     def __init__(self, samples, sample_rate, channels, bits_per_sample,
-                 channel_mask = None):
+                 channel_mask=None):
         import audiotools.pcm
 
         self.framelist = audiotools.pcm.from_list(samples,
@@ -29,13 +29,15 @@ class FrameListReader:
             self.channel_mask = channel_mask
         self.bits_per_sample = bits_per_sample
 
-    def read(self, bytes):
-        (framelist, self.framelist) = self.framelist.split(
-            self.framelist.frame_count(bytes))
+    def read(self, pcm_frames):
+        (framelist, self.framelist) = self.framelist.split(pcm_frames)
         return framelist
 
+    def read_closed(self, pcm_frames):
+        raise ValueError()
+
     def close(self):
-        pass
+        self.read = self.read_closed
 
 
 class MD5Reader:
@@ -47,13 +49,18 @@ class MD5Reader:
         self.bits_per_sample = pcmreader.bits_per_sample
         self.md5 = md5()
 
+    def reset(self):
+        if (hasattr(self.pcmreader, "reset")):
+            self.pcmreader.reset()
+        self.md5 = md5()
+
     def __repr__(self):
         return "MD5Reader(%s,%s,%s)" % (self.sample_rate,
                                         self.channels,
                                         self.bits_per_sample)
 
-    def read(self, bytes):
-        framelist = self.pcmreader.read(bytes)
+    def read(self, pcm_frames):
+        framelist = self.pcmreader.read(pcm_frames)
         self.md5.update(framelist.to_bytes(False, True))
         return framelist
 
@@ -109,14 +116,15 @@ class Sine8_Mono(Sine_Mono):
                  f1, a1, f2, a2):
         Sine_Mono.__init__(self, 8, pcm_frames, sample_rate,
                            f1, a1, f2, a2)
+        self.pcm_frames = pcm_frames
         self.f1 = f1
         self.a1 = a1
         self.f2 = f2
         self.a2 = a2
         self.md5 = md5()
 
-    def read(self, bytes):
-        framelist = Sine_Mono.read(self, bytes)
+    def read(self, pcm_frames):
+        framelist = Sine_Mono.read(self, pcm_frames)
         self.md5.update(framelist.to_bytes(False, True))
         return framelist
 
@@ -131,8 +139,9 @@ class Sine8_Mono(Sine_Mono):
         self.md5 = md5()
 
     def __repr__(self):
-        return "Sine8_Mono(%s, %s, %s, %s, %s)" % \
-            (repr(self.sample_rate),
+        return "Sine8_Mono(%s, %s, %s, %s, %s, %s)" % \
+            (repr(self.pcm_frames),
+             repr(self.sample_rate),
              repr(self.f1),
              repr(self.a1),
              repr(self.f2),
@@ -144,6 +153,7 @@ class Sine8_Stereo(Sine_Stereo):
                  f1, a1, f2, a2, fmult):
         Sine_Stereo.__init__(self, 8, pcm_frames,
                              sample_rate, f1, a1, f2, a2, fmult)
+        self.pcm_frames = pcm_frames
         self.f1 = f1
         self.a1 = a1
         self.f2 = f2
@@ -151,8 +161,8 @@ class Sine8_Stereo(Sine_Stereo):
         self.fmult = fmult
         self.md5 = md5()
 
-    def read(self, bytes):
-        framelist = Sine_Stereo.read(self, bytes)
+    def read(self, pcm_frames):
+        framelist = Sine_Stereo.read(self, pcm_frames)
         self.md5.update(framelist.to_bytes(False, True))
         return framelist
 
@@ -167,8 +177,9 @@ class Sine8_Stereo(Sine_Stereo):
         self.md5 = md5()
 
     def __repr__(self):
-        return "Sine8_Stereo(%s, %s, %s, %s, %s, %s)" % \
-            (repr(self.sample_rate),
+        return "Sine8_Stereo(%s, %s, %s, %s, %s, %s, %s)" % \
+            (repr(self.pcm_frames),
+             repr(self.sample_rate),
              repr(self.f1),
              repr(self.a1),
              repr(self.f2),
@@ -181,6 +192,7 @@ class Sine16_Mono(Sine8_Mono):
                  f1, a1, f2, a2):
         Sine_Mono.__init__(self, 16, pcm_frames, sample_rate,
                            f1, a1, f2, a2)
+        self.pcm_frames = pcm_frames
         self.f1 = f1
         self.a1 = a1
         self.f2 = f2
@@ -188,8 +200,9 @@ class Sine16_Mono(Sine8_Mono):
         self.md5 = md5()
 
     def __repr__(self):
-        return "Sine16_Mono(%s, %s, %s, %s, %s)" % \
-            (repr(self.sample_rate),
+        return "Sine16_Mono(%s, %s, %s, %s, %s, %s)" % \
+            (repr(self.pcm_frames),
+             repr(self.sample_rate),
              repr(self.f1),
              repr(self.a1),
              repr(self.f2),
@@ -201,6 +214,7 @@ class Sine16_Stereo(Sine8_Stereo):
                  f1, a1, f2, a2, fmult):
         Sine_Stereo.__init__(self, 16, pcm_frames, sample_rate,
                              f1, a1, f2, a2, fmult)
+        self.pcm_frames = pcm_frames
         self.f1 = f1
         self.a1 = a1
         self.f2 = f2
@@ -209,8 +223,9 @@ class Sine16_Stereo(Sine8_Stereo):
         self.md5 = md5()
 
     def __repr__(self):
-        return "Sine16_Stereo(%s, %s, %s, %s, %s, %s)" % \
-            (repr(self.sample_rate),
+        return "Sine16_Stereo(%s, %s, %s, %s, %s, %s, %s)" % \
+            (repr(self.pcm_frames),
+             repr(self.sample_rate),
              repr(self.f1),
              repr(self.a1),
              repr(self.f2),
@@ -223,6 +238,7 @@ class Sine24_Mono(Sine8_Mono):
                  f1, a1, f2, a2):
         Sine_Mono.__init__(self, 24, pcm_frames, sample_rate,
                             f1, a1, f2, a2)
+        self.pcm_frames = pcm_frames
         self.f1 = f1
         self.a1 = a1
         self.f2 = f2
@@ -230,8 +246,9 @@ class Sine24_Mono(Sine8_Mono):
         self.md5 = md5()
 
     def __repr__(self):
-        return "Sine24_Mono(%s, %s, %s, %s, %s)" % \
-            (repr(self.sample_rate),
+        return "Sine24_Mono(%s, %s, %s, %s, %s, %s)" % \
+            (repr(self.pcm_frames),
+             repr(self.sample_rate),
              repr(self.f1),
              repr(self.a1),
              repr(self.f2),
@@ -243,6 +260,7 @@ class Sine24_Stereo(Sine8_Stereo):
                  f1, a1, f2, a2, fmult):
         Sine_Stereo.__init__(self, 24, pcm_frames, sample_rate,
                              f1, a1, f2, a2, fmult)
+        self.pcm_frames = pcm_frames
         self.f1 = f1
         self.a1 = a1
         self.f2 = f2
@@ -251,8 +269,9 @@ class Sine24_Stereo(Sine8_Stereo):
         self.md5 = md5()
 
     def __repr__(self):
-        return "Sine24_Stereo(%s, %s, %s, %s, %s, %s)" % \
-            (repr(self.sample_rate),
+        return "Sine24_Stereo(%s, %s, %s, %s, %s, %s, %s)" % \
+            (repr(self.pcm_frames),
+             repr(self.sample_rate),
              repr(self.f1),
              repr(self.a1),
              repr(self.f2),
@@ -283,9 +302,9 @@ class Simple_Sine:
                                                       self.channel_counts)]
         self.md5 = md5()
 
-    def read(self, bytes):
+    def read(self, pcm_frames):
         framelist = audiotools.pcm.from_channels(
-            [stream.read(bytes / self.channels) for stream in self.streams])
+            [stream.read(pcm_frames) for stream in self.streams])
         self.md5.update(framelist.to_bytes(False, True))
         return framelist
 
@@ -305,13 +324,13 @@ class Simple_Sine:
             stream.close()
 
     def __repr__(self):
-        return "Simple_Sine(%s, %s, %s, %s, %s, %s)" % \
+        return "Simple_Sine(%s, %s, %s, %s, *%s)" % \
             (self.pcm_frames,
              self.sample_rate,
              self.channel_mask,
              self.bits_per_sample,
-             repr(self.channel_max_values),
-             repr(self.channel_counts))
+             repr([(m, c) for m, c in zip(self.channel_max_values,
+                                          self.channel_counts)]))
 
 
 class WastedBPS16:
@@ -328,10 +347,9 @@ class WastedBPS16:
         self.sample_frame = audiotools.pcm.FrameList("", 2, 16, False, False)
         self.md5 = md5()
 
-    def read(self, bytes):
+    def read(self, pcm_frames):
         wave = []
-        for i in xrange(min(self.sample_frame.frame_count(bytes),
-                            self.pcm_frames)):
+        for i in xrange(min(pcm_frames, self.pcm_frames)):
             wave.append((self.i % 2000) << 2)
             wave.append((self.i % 1000) << 3)
             self.i += 1
@@ -343,6 +361,9 @@ class WastedBPS16:
         self.pcm_frames -= framelist.frames
         self.md5.update(framelist.to_bytes(False, True))
         return framelist
+
+    def read_closed(self, pcm_frames):
+        raise ValueError()
 
     def reset(self):
         self.i = 0
@@ -356,7 +377,7 @@ class WastedBPS16:
         return self.md5.hexdigest()
 
     def close(self):
-        self.pcm_frames = 0
+        self.read = self.read_closed
 
     def __repr__(self):
         return "WastedBPS(%s)" % (repr(self.pcm_frames))

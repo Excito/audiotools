@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 #Audio Tools, a module and set of tools for manipulating audio data
-#Copyright (C) 2007-2011  Brian Langenberger
+#Copyright (C) 2007-2012  Brian Langenberger
 
 #This program is free software; you can redistribute it and/or modify
 #it under the terms of the GNU General Public License as published by
@@ -17,699 +17,3340 @@
 #along with this program; if not, write to the Free Software
 #Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
-import array
-import audiotools
-import sys,cStringIO
 
-Con = audiotools.Con
+from . import (AudioFile, MetaData, InvalidFile, Image,
+               WaveContainer, AiffContainer)
+from .vorbiscomment import VorbisComment
+from .id3 import skip_id3v2_comment
 
-class UTF8(Con.Struct):
-    @classmethod
-    def __total_utf8_bytes__(cls, header):
-        total = 0
-        for b in header:
-            if b == '\x01':
-                total += 1
-            else:
+
+#######################
+#FLAC
+#######################
+
+
+class InvalidFLAC(InvalidFile):
+    pass
+
+
+class FlacMetaDataBlockTooLarge(Exception):
+    """raised if one attempts to build a FlacMetaDataBlock too large"""
+
+    pass
+
+
+class FlacMetaData(MetaData):
+    """a class for managing a native FLAC's metadata"""
+
+    def __init__(self, blocks):
+        self.__dict__["block_list"] = list(blocks)
+
+    def has_block(self, block_id):
+        """returns True if the given block ID is present"""
+
+        return block_id in [b.BLOCK_ID for b in self.block_list]
+
+    def add_block(self, block):
+        """adds the given block to our list of blocks"""
+
+        #the specification only requires that STREAMINFO be first
+        #the rest are largely arbitrary,
+        #though I like to keep PADDING as the last block for aesthetic reasons
+        PREFERRED_ORDER = [Flac_STREAMINFO.BLOCK_ID,
+                           Flac_SEEKTABLE.BLOCK_ID,
+                           Flac_CUESHEET.BLOCK_ID,
+                           Flac_VORBISCOMMENT.BLOCK_ID,
+                           Flac_PICTURE.BLOCK_ID,
+                           Flac_APPLICATION.BLOCK_ID,
+                           Flac_PADDING.BLOCK_ID]
+
+        stop_blocks = set(
+            PREFERRED_ORDER[PREFERRED_ORDER.index(block.BLOCK_ID) + 1:])
+
+        for (index, old_block) in enumerate(self.block_list):
+            if (old_block.BLOCK_ID in stop_blocks):
+                self.block_list.insert(index, block)
                 break
-        return max(1,total)
+        else:
+            self.block_list.append(block)
+
+    def get_block(self, block_id):
+        """returns the first instance of the given block_id
+
+        may raise IndexError if the block is not in our list of blocks"""
+
+        for block in self.block_list:
+            if (block.BLOCK_ID == block_id):
+                return block
+        else:
+            raise IndexError()
+
+    def get_blocks(self, block_id):
+        """returns all instances of the given block_id in our list of blocks"""
+
+        return [b for b in self.block_list if (b.BLOCK_ID == block_id)]
+
+    def replace_blocks(self, block_id, blocks):
+        """replaces all instances of the given block_id with
+        blocks taken from the given list
+
+        if insufficient matching blocks are present,
+        this uses add_block() to populate the remainder
+
+        if additional matching blocks are present,
+        they are removed
+        """
+
+        new_blocks = []
+
+        for block in self.block_list:
+            if (block.BLOCK_ID == block_id):
+                if (len(blocks) > 0):
+                    new_blocks.append(blocks.pop(0))
+                else:
+                    pass
+            else:
+                new_blocks.append(block)
+
+        self.block_list = new_blocks
+
+        while (len(blocks) > 0):
+            self.add_block(blocks.pop(0))
+
+    def __setattr__(self, key, value):
+        if (key in self.FIELDS):
+            try:
+                vorbis_comment = self.get_block(Flac_VORBISCOMMENT.BLOCK_ID)
+            except IndexError:
+                #add VORBIS comment block if necessary
+                from . import VERSION
+
+                vorbis_comment = Flac_VORBISCOMMENT(
+                    [], u"Python Audio Tools %s" % (VERSION))
+
+                self.add_block(vorbis_comment)
+
+            setattr(vorbis_comment, key, value)
+        else:
+            self.__dict__[key] = value
+
+    def __getattr__(self, key):
+        if (key in self.FIELDS):
+            try:
+                return getattr(self.get_block(Flac_VORBISCOMMENT.BLOCK_ID),
+                               key)
+            except IndexError:
+                #no VORBIS comment block, so all values are None
+                return None
+        else:
+            try:
+                return self.__dict__[key]
+            except KeyError:
+                raise AttributeError(key)
+
+    def __delattr__(self, key):
+        if (key in self.FIELDS):
+            try:
+                delattr(self.get_block(Flac_VORBISCOMMENT.BLOCK_ID), key)
+            except IndexError:
+                #no VORBIS comment block, so nothing to delete
+                pass
+        else:
+            try:
+                del(self.__dict__[key])
+            except KeyError:
+                raise AttributeError(key)
 
     @classmethod
-    def __calculate_utf8_value__(cls, ctx):
-        import operator
+    def converted(cls, metadata):
+        """takes a MetaData object and returns a FlacMetaData object"""
 
-        return Con.lib.bin_to_int(ctx.header[ctx.header.index('\x00') + 1:] + \
-                                  reduce(operator.concat,
-                                         [s[2:] for s in ctx['sub_byte']],
-                                         ''))
-
-    def __init__(self, name):
-        Con.Struct.__init__(
-            self,name,
-            Con.Bytes('header',8),
-            Con.Value('total_bytes',
-                      lambda ctx: self.__total_utf8_bytes__(ctx['header'])),
-            Con.MetaRepeater(
-            lambda ctx: self.__total_utf8_bytes__(ctx['header']) - 1,
-            Con.Bytes('sub_byte',8)),
-            Con.Value('value',
-                      lambda ctx: self.__calculate_utf8_value__(ctx)))
-
-class Unary(Con.Adapter):
-    def __init__(self, name):
-        Con.Adapter.__init__(
-            self,
-            Con.RepeatUntil(lambda obj,ctx: obj == 1,
-                            Con.Byte(name)))
-
-    def _encode(self, value, context):
-        if (value > 0):
-            return ([0] * (value)) + [1]
+        if (metadata is None):
+            return None
+        elif (isinstance(metadata, FlacMetaData)):
+            return cls([block.copy() for block in metadata.block_list])
         else:
-            return [1]
+            return cls([Flac_VORBISCOMMENT.converted(metadata)] +
+                       [Flac_PICTURE.converted(image)
+                        for image in metadata.images()] +
+                       [Flac_PADDING(4096)])
 
-    def _decode(self, obj, context):
-        return len(obj) - 1
+    def add_image(self, image):
+        """embeds an Image object in this metadata"""
 
-class PlusOne(Con.Adapter):
-    def _encode(self, value, context):
-        return value - 1
+        self.add_block(Flac_PICTURE.converted(image))
 
-    def _decode(self, obj, context):
-        return obj + 1
+    def delete_image(self, image):
+        """deletes an image object from this metadata"""
 
-class FlacStreamException(Exception): pass
+        self.block_list = [b for b in self.block_list
+                           if not ((b.BLOCK_ID == Flac_PICTURE.BLOCK_ID) and
+                                   (b == image))]
 
-class FlacReader:
-    FRAME_HEADER = Con.Struct('frame_header',
-                              Con.Bits('sync',14),
-                              Con.Bits('reserved',2),
-                              Con.Bits('block_size',4),
-                              Con.Bits('sample_rate',4),
-                              Con.Bits('channel_assignment',4),
-                              Con.Bits('bits_per_sample',3),
-                              Con.Padding(1),
-                              Con.IfThenElse(
-        'total_channels',
-        lambda ctx1: ctx1['channel_assignment'] <= 7,
-        Con.Value('c',lambda ctx2: ctx2['channel_assignment'] + 1),
-        Con.Value('c',lambda ctx3: 2)),
+    def images(self):
+        """returns a list of embedded Image objects"""
 
-                              UTF8('frame_number'),
+        return self.get_blocks(Flac_PICTURE.BLOCK_ID)
 
-                              Con.IfThenElse(
-        'extended_block_size',
-        lambda ctx1: ctx1['block_size'] == 6,
-        Con.Bits('b',8),
-        Con.If(lambda ctx2: ctx2['block_size'] == 7,
-               Con.Bits('b',16))),
+    @classmethod
+    def supports_images(cls):
+        """returns True"""
 
-                              Con.IfThenElse(
-        'extended_sample_rate',
-        lambda ctx1: ctx1['sample_rate'] == 12,
-        Con.Bits('s',8),
-        Con.If(lambda ctx2: ctx2['sample_rate'] in (13,14),
-               Con.Bits('s',16))),
+        return True
 
-                              Con.Bits('crc8',8))
+    def clean(self, fixes_performed):
+        """returns a new FlacMetaData object that's been cleaned of problems
 
-    UNARY = Con.Struct('unary',
-                       Con.RepeatUntil(
-        lambda obj,ctx: obj == '\x01',
-        Con.Field('bytes',1)),
-                       Con.Value('value',
-                                 lambda ctx: len(ctx['bytes']) - 1)
-                       )
+        any fixes performed are appended to fixes_performed as unicode"""
 
-    SUBFRAME_HEADER = Con.Struct('subframe_header',
-                                 Con.Padding(1),
-                                 Con.Bits('subframe_type',6),
-                                 Con.Flag('has_wasted_bits_per_sample'),
-                                 Con.IfThenElse(
-        'wasted_bits_per_sample',
-        lambda ctx: ctx['has_wasted_bits_per_sample'],
-        PlusOne(Unary('value')),
-        Con.Value('value',lambda ctx2: 0)))
+        from .text import (CLEAN_FLAC_REORDERED_STREAMINFO,
+                           CLEAN_FLAC_MULITPLE_STREAMINFO,
+                           CLEAN_FLAC_MULTIPLE_VORBISCOMMENT,
+                           CLEAN_FLAC_MULTIPLE_SEEKTABLE,
+                           CLEAN_FLAC_MULTIPLE_CUESHEET,
+                           CLEAN_FLAC_UNDEFINED_BLOCK)
 
+        cleaned_blocks = []
 
-    GET_BLOCKSIZE_FROM_STREAMINFO = -1
-    GET_8BIT_BLOCKSIZE_FROM_END_OF_HEADER = -2
-    GET_16BIT_BLOCKSIZE_FROM_END_OF_HEADER = -3
-
-    BLOCK_SIZE = (GET_BLOCKSIZE_FROM_STREAMINFO,
-                  192,
-                  576,1152,2304,4608,
-                  GET_8BIT_BLOCKSIZE_FROM_END_OF_HEADER,
-                  GET_16BIT_BLOCKSIZE_FROM_END_OF_HEADER,
-                  256,512,1024,2048,4096,8192,16384,32768)
-
-    GET_SAMPLE_SIZE_FROM_STREAMINFO = -1
-    SAMPLE_SIZE = (GET_SAMPLE_SIZE_FROM_STREAMINFO,
-                   8,12,None,16,20,24,None)
-
-    def FIXED0(subframe,residual,i):
-        subframe.insert(i,
-                        residual[i])
-
-    def FIXED1(subframe,residual,i):
-        subframe.insert(i,
-                        subframe[i - 1] + residual[i])
-
-    def FIXED2(subframe,residual,i):
-        subframe.insert(i,
-                        ((2 * subframe[i - 1]) - subframe[i - 2] + \
-                         residual[i]))
-
-    def FIXED3(subframe,residual,i):
-        subframe.insert(i,
-                        ((3 * subframe[i - 1]) - (3 * subframe[i - 2]) + \
-                         subframe[i - 3] + residual[i]))
-
-    def FIXED4(subframe,residual,i):
-        subframe.insert(i,
-                        ((4 * subframe[i - 1]) - (6 * subframe[i - 2]) + \
-                         (4 * subframe[i - 3]) - subframe[i - 4] + residual[i]))
-
-    #iterates over all of the channels, in order
-    def MERGE_INDEPENDENT(channel_list):
-        channel_data = [iter(c) for c in channel_list]
-
-        while (True):
-            for channel in channel_data:
-                yield channel.next()
-
-    def MERGE_LEFT(channel_list):
-        channel_left = iter(channel_list[0])
-        channel_side = iter(channel_list[1])
-
-        while (True):
-            left = channel_left.next()
-            side = channel_side.next()
-
-            yield left
-            yield left - side
-
-
-    def MERGE_RIGHT(channel_list):
-        channel_side = iter(channel_list[0])
-        channel_right = iter(channel_list[1])
-
-        while (True):
-            side = channel_side.next()
-            right = channel_right.next()
-
-            yield side + right
-            yield right
-
-    def MERGE_MID(channel_list):
-        channel_mid = iter(channel_list[0])
-        channel_side = iter(channel_list[1])
-
-        while (True):
-            mid = channel_mid.next()
-            side = channel_side.next()
-
-            mid = mid << 1
-            mid |= (side & 0x1)
-
-            yield (mid + side) >> 1
-            yield (mid - side) >> 1
-
-
-    CHANNEL_FUNCTIONS = (MERGE_INDEPENDENT,
-                         MERGE_INDEPENDENT,
-                         MERGE_INDEPENDENT,
-                         MERGE_INDEPENDENT,
-                         MERGE_INDEPENDENT,
-                         MERGE_INDEPENDENT,
-                         MERGE_INDEPENDENT,
-                         MERGE_INDEPENDENT,
-                         MERGE_LEFT,
-                         MERGE_RIGHT,
-                         MERGE_MID)
-
-    FIXED_FUNCTIONS = (FIXED0,FIXED1,FIXED2,FIXED3,FIXED4)
-
-    def __init__(self, flac_stream):
-        self.stream = BufferedStream(flac_stream)
-        self.streaminfo = None
-        self.bitstream = None
-
-        #ensure the file starts with 'fLaC'
-        self.read_stream_marker()
-
-        #initialize self.bitstream
-        self.begin_bitstream()
-
-        #find self.streaminfo in case we need it
-        self.read_metadata_blocks()
-
-    def close(self):
-        if (self.bitstream != None):
-            self.bitstream.close()
-        else:
-            self.stream.close()
-
-
-    def read_stream_marker(self):
-        if (self.stream.read(4) != 'fLaC'):
-            raise FlacStreamException('invalid stream marker')
-
-    def read_metadata_blocks(self):
-        block = audiotools.FlacAudio.METADATA_BLOCK_HEADER.parse_stream(self.stream)
-        while (block.last_block == 0):
-            if (block.block_type == 0):
-                self.streaminfo = audiotools.FlacAudio.STREAMINFO.parse_stream(self.stream)
+        for block in self.block_list:
+            if (block.BLOCK_ID == Flac_STREAMINFO.BLOCK_ID):
+                #reorder STREAMINFO block to be first, if necessary
+                if (len(cleaned_blocks) == 0):
+                    cleaned_blocks.append(block)
+                elif (cleaned_blocks[0].BLOCK_ID != block.BLOCK_ID):
+                    fixes_performed.append(
+                        CLEAN_FLAC_REORDERED_STREAMINFO)
+                    cleaned_blocks.insert(0, block)
+                else:
+                    fixes_performed.append(
+                        CLEAN_FLAC_MULITPLE_STREAMINFO)
+            elif (block.BLOCK_ID == Flac_VORBISCOMMENT.BLOCK_ID):
+                if (block.BLOCK_ID in [b.BLOCK_ID for b in cleaned_blocks]):
+                    #remove redundant VORBIS_COMMENT blocks
+                    fixes_performed.append(
+                        CLEAN_FLAC_MULTIPLE_VORBISCOMMENT)
+                else:
+                    #recursively clean up the text fields in FlacVorbisComment
+                    cleaned_blocks.append(block.clean(fixes_performed))
+            elif (block.BLOCK_ID == Flac_PICTURE.BLOCK_ID):
+                #recursively clean up any image blocks
+                cleaned_blocks.append(block.clean(fixes_performed))
+            elif (block.BLOCK_ID == Flac_APPLICATION.BLOCK_ID):
+                cleaned_blocks.append(block)
+            elif (block.BLOCK_ID == Flac_SEEKTABLE.BLOCK_ID):
+                #remove redundant seektable, if necessary
+                if (block.BLOCK_ID in [b.BLOCK_ID for b in cleaned_blocks]):
+                    fixes_performed.append(
+                        CLEAN_FLAC_MULTIPLE_SEEKTABLE)
+                else:
+                    cleaned_blocks.append(block.clean(fixes_performed))
+            elif (block.BLOCK_ID == Flac_CUESHEET.BLOCK_ID):
+                #remove redundant cuesheet, if necessary
+                if (block.BLOCK_ID in [b.BLOCK_ID for b in cleaned_blocks]):
+                    fixes_performed.append(
+                        CLEAN_FLAC_MULTIPLE_CUESHEET)
+                else:
+                    cleaned_blocks.append(block)
+            elif (block.BLOCK_ID == Flac_PADDING.BLOCK_ID):
+                cleaned_blocks.append(block)
             else:
-                self.stream.seek(block.block_length,1)
+                #remove undefined blocks
+                fixes_performed.append(CLEAN_FLAC_UNDEFINED_BLOCK)
 
-            block = audiotools.FlacAudio.METADATA_BLOCK_HEADER.parse_stream(self.stream)
-        self.stream.seek(block.block_length,1)
+        return self.__class__(cleaned_blocks)
 
-    def begin_bitstream(self):
-        import bitstream
+    def __repr__(self):
+        return "FlacMetaData(%s)" % (self.block_list)
 
-        #self.bitstream = Con.BitStreamReader(self.stream)
-        self.bitstream = bitstream.BitStreamReader(self.stream)
+    @classmethod
+    def parse(cls, reader):
+        """returns a FlacMetaData object from the given BitstreamReader
+        which has already parsed the 4-byte 'fLaC' file ID"""
 
-    def read_frame(self):
-        self.stream.reset_buffer()
+        block_list = []
+
+        last = 0
+
+        while (last != 1):
+            (last, block_type, block_length) = reader.parse("1u7u24u")
+
+            if (block_type == 0):    # STREAMINFO
+                block_list.append(
+                    Flac_STREAMINFO.parse(reader.substream(block_length)))
+            elif (block_type == 1):  # PADDING
+                block_list.append(
+                    Flac_PADDING.parse(
+                        reader.substream(block_length), block_length))
+            elif (block_type == 2):  # APPLICATION
+                block_list.append(
+                    Flac_APPLICATION.parse(
+                        reader.substream(block_length), block_length))
+            elif (block_type == 3):  # SEEKTABLE
+                block_list.append(
+                    Flac_SEEKTABLE.parse(
+                        reader.substream(block_length), block_length / 18))
+            elif (block_type == 4):  # VORBIS_COMMENT
+                block_list.append(
+                    Flac_VORBISCOMMENT.parse(
+                        reader.substream(block_length)))
+            elif (block_type == 5):  # CUESHEET
+                block_list.append(
+                    Flac_CUESHEET.parse(reader.substream(block_length)))
+            elif (block_type == 6):  # PICTURE
+                block_list.append(
+                    Flac_PICTURE.parse(reader.substream(block_length)))
+            elif ((block_type >= 7) and (block_type <= 126)):
+                from .text import ERR_FLAC_RESERVED_BLOCK
+                raise ValueError(ERR_FLAC_RESERVED_BLOCK % (block_type))
+            else:
+                from .text import ERR_FLAC_INVALID_BLOCK
+                raise ValueError(ERR_FLAC_INVALID_BLOCK)
+
+        return cls(block_list)
+
+    def raw_info(self):
+        """returns human-readable metadata as a unicode string"""
+
+        from os import linesep
+
+        return linesep.decode('ascii').join(
+            ["FLAC Tags:"] + [block.raw_info() for block in self.blocks()])
+
+    def blocks(self):
+        """yields FlacMetaData's individual metadata blocks"""
+
+        for block in self.block_list:
+            yield block
+
+    def build(self, writer):
+        """writes the FlacMetaData to the given BitstreamWriter
+        not including the 4-byte 'fLaC' file ID"""
+
+        from . import iter_last
+
+        for (last_block,
+             block) in iter_last(iter([b for b in self.blocks()
+                                       if (b.size() < (2 ** 24))])):
+            if (not last_block):
+                writer.build("1u7u24u", (0, block.BLOCK_ID, block.size()))
+            else:
+                writer.build("1u7u24u", (1, block.BLOCK_ID, block.size()))
+
+            block.build(writer)
+
+    def size(self):
+        """returns the size of all metadata blocks
+        including the block headers
+        but not including the 4-byte 'fLaC' file ID"""
+
+        from operator import add
+
+        return reduce(add, [4 + b.size() for b in self.block_list], 0)
+
+
+class Flac_STREAMINFO:
+    BLOCK_ID = 0
+
+    def __init__(self, minimum_block_size, maximum_block_size,
+                 minimum_frame_size, maximum_frame_size,
+                 sample_rate, channels, bits_per_sample,
+                 total_samples, md5sum):
+        """all values are non-negative integers except for md5sum
+        which is a 16-byte binary string"""
+
+        self.minimum_block_size = minimum_block_size
+        self.maximum_block_size = maximum_block_size
+        self.minimum_frame_size = minimum_frame_size
+        self.maximum_frame_size = maximum_frame_size
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.bits_per_sample = bits_per_sample
+        self.total_samples = total_samples
+        self.md5sum = md5sum
+
+    def copy(self):
+        """returns a duplicate of this metadata block"""
+
+        return Flac_STREAMINFO(self.minimum_block_size,
+                               self.maximum_block_size,
+                               self.minimum_frame_size,
+                               self.maximum_frame_size,
+                               self.sample_rate,
+                               self.channels,
+                               self.bits_per_sample,
+                               self.total_samples,
+                               self.md5sum)
+
+    def __eq__(self, block):
+        for attr in ["minimum_block_size",
+                     "maximum_block_size",
+                     "minimum_frame_size",
+                     "maximum_frame_size",
+                     "sample_rate",
+                     "channels",
+                     "bits_per_sample",
+                     "total_samples",
+                     "md5sum"]:
+            if ((not hasattr(block, attr)) or (getattr(self, attr) !=
+                                               getattr(block, attr))):
+                return False
+        else:
+            return True
+
+    def __repr__(self):
+        return ("Flac_STREAMINFO(%s)" %
+                ",".join(["%s=%s" % (key, repr(getattr(self, key)))
+                          for key in ["minimum_block_size",
+                                      "maximum_block_size",
+                                      "minimum_frame_size",
+                                      "maximum_frame_size",
+                                      "sample_rate",
+                                      "channels",
+                                      "bits_per_sample",
+                                      "total_samples",
+                                      "md5sum"]]))
+
+    def raw_info(self):
+        """returns a human-readable version of this metadata block
+        as unicode"""
+
+        from os import linesep
+
+        return linesep.decode('ascii').join(
+            [u"  STREAMINFO:",
+             u"    minimum block size = %d" % (self.minimum_block_size),
+             u"    maximum block size = %d" % (self.maximum_block_size),
+             u"    minimum frame size = %d" % (self.minimum_frame_size),
+             u"    maximum frame size = %d" % (self.maximum_frame_size),
+             u"           sample rate = %d" % (self.sample_rate),
+             u"              channels = %d" % (self.channels),
+             u"       bits-per-sample = %d" % (self.bits_per_sample),
+             u"         total samples = %d" % (self.total_samples),
+             u"               MD5 sum = %s" %
+             (u"".join(["%2.2X" % (ord(b)) for b in self.md5sum]))])
+
+    @classmethod
+    def parse(cls, reader):
+        """returns this metadata block from a BitstreamReader"""
+
+        values = reader.parse("16u16u24u24u20u3u5u36U16b")
+        values[5] += 1  # channels
+        values[6] += 1  # bits-per-sample
+        return cls(*values)
+
+    def build(self, writer):
+        """writes this metadata block to a BitstreamWriter"""
+
+        writer.build("16u16u24u24u20u3u5u36U16b",
+                     (self.minimum_block_size,
+                      self.maximum_block_size,
+                      self.minimum_frame_size,
+                      self.maximum_frame_size,
+                      self.sample_rate,
+                      self.channels - 1,
+                      self.bits_per_sample - 1,
+                      self.total_samples,
+                      self.md5sum))
+
+    def size(self):
+        """the size of this metadata block
+        not including the 4-byte block header"""
+
+        return 34
+
+
+class Flac_PADDING:
+    BLOCK_ID = 1
+
+    def __init__(self, length):
+        self.length = length
+
+    def copy(self):
+        """returns a duplicate of this metadata block"""
+
+        return Flac_PADDING(self.length)
+
+    def __repr__(self):
+        return "Flac_PADDING(%d)" % (self.length)
+
+    def raw_info(self):
+        """returns a human-readable version of this metadata block
+        as unicode"""
+
+        from os import linesep
+
+        return linesep.decode('ascii').join(
+            [u"  PADDING:",
+             u"    length = %d" % (self.length)])
+
+    @classmethod
+    def parse(cls, reader, block_length):
+        """returns this metadata block from a BitstreamReader"""
+
+        reader.skip_bytes(block_length)
+        return cls(length=block_length)
+
+    def build(self, writer):
+        """writes this metadata block to a BitstreamWriter"""
+
+        writer.write_bytes(chr(0) * self.length)
+
+    def size(self):
+        """the size of this metadata block
+        not including the 4-byte block header"""
+
+        return self.length
+
+
+class Flac_APPLICATION:
+    BLOCK_ID = 2
+
+    def __init__(self, application_id, data):
+        self.application_id = application_id
+        self.data = data
+
+    def __eq__(self, block):
+        for attr in ["application_id", "data"]:
+            if ((not hasattr(block, attr)) or (getattr(self, attr) !=
+                                               getattr(block, attr))):
+                return False
+        else:
+            return True
+
+    def copy(self):
+        """returns a duplicate of this metadata block"""
+
+        return Flac_APPLICATION(self.application_id,
+                                self.data)
+
+    def __repr__(self):
+        return "Flac_APPLICATION(%s, %s)" % (repr(self.application_id),
+                                             repr(self.data))
+
+    def raw_info(self):
+        """returns a human-readable version of this metadata block
+        as unicode"""
+
+        from os import linesep
+
+        return u"  APPLICATION:%s    %s (%d bytes)" % \
+            (linesep.decode('ascii'),
+             self.application_id.decode('ascii'),
+             len(self.data))
+
+    @classmethod
+    def parse(cls, reader, block_length):
+        """returns this metadata block from a BitstreamReader"""
+
+        return cls(application_id=reader.read_bytes(4),
+                   data=reader.read_bytes(block_length - 4))
+
+    def build(self, writer):
+        """writes this metadata block to a BitstreamWriter"""
+
+        writer.write_bytes(self.application_id)
+        writer.write_bytes(self.data)
+
+    def size(self):
+        """the size of this metadata block
+        not including the 4-byte block header"""
+
+        return len(self.application_id) + len(self.data)
+
+
+class Flac_SEEKTABLE:
+    BLOCK_ID = 3
+
+    def __init__(self, seekpoints):
+        """seekpoints is a list of
+        (PCM frame offset, byte offset, PCM frame count) tuples"""
+        self.seekpoints = seekpoints
+
+    def __eq__(self, block):
+        if (hasattr(block, "seekpoints")):
+            return self.seekpoints == block.seekpoints
+        else:
+            return False
+
+    def copy(self):
+        """returns a duplicate of this metadata block"""
+
+        return Flac_SEEKTABLE(self.seekpoints[:])
+
+    def __repr__(self):
+        return "Flac_SEEKTABLE(%s)" % (repr(self.seekpoints))
+
+    def raw_info(self):
+        """returns a human-readable version of this metadata block
+        as unicode"""
+
+        from os import linesep
+
+        return linesep.decode('ascii').join(
+            [u"  SEEKTABLE:",
+             u"    first sample   file offset   frame samples"] +
+            [u"  %14.1d %13.1X %15.d" % seekpoint
+             for seekpoint in self.seekpoints])
+
+    @classmethod
+    def parse(cls, reader, total_seekpoints):
+        """returns this metadata block from a BitstreamReader"""
+
+        return cls([tuple(reader.parse("64U64U16u"))
+                    for i in xrange(total_seekpoints)])
+
+    def build(self, writer):
+        """writes this metadata block to a BitstreamWriter"""
+
+        for seekpoint in self.seekpoints:
+            writer.build("64U64U16u", seekpoint)
+
+    def size(self):
+        """the size of this metadata block
+        not including the 4-byte block header"""
+
+        from .bitstream import format_size
+
+        return (format_size("64U64U16u") / 8) * len(self.seekpoints)
+
+    def clean(self, fixes_performed):
+        """removes any empty seek points
+        and ensures PCM frame offset and byte offset
+        are both incrementing"""
+
+        nonempty_points = [seekpoint for seekpoint in self.seekpoints
+                           if (seekpoint[2] != 0)]
+        if (len(nonempty_points) != len(self.seekpoints)):
+            from .text import CLEAN_FLAC_REMOVE_SEEKPOINTS
+            fixes_performed.append(CLEAN_FLAC_REMOVE_SEEKPOINTS)
+
+        ascending_order = list(set(nonempty_points))
+        ascending_order.sort()
+
+        if (ascending_order != nonempty_points):
+            from .text import CLEAN_FLAC_REORDER_SEEKPOINTS
+            fixes_performed.append(CLEAN_FLAC_REORDER_SEEKPOINTS)
+
+        return Flac_SEEKTABLE(ascending_order)
+
+
+class Flac_VORBISCOMMENT(VorbisComment):
+    BLOCK_ID = 4
+
+    def copy(self):
+        """returns a duplicate of this metadata block"""
+
+        return Flac_VORBISCOMMENT(self.comment_strings[:],
+                                  self.vendor_string)
+
+    def __repr__(self):
+        return "Flac_VORBISCOMMENT(%s, %s)" % \
+            (repr(self.comment_strings), repr(self.vendor_string))
+
+    def raw_info(self):
+        """returns a human-readable version of this metadata block
+        as unicode"""
+
+        from os import linesep
+        from . import display_unicode
+
+        #align the text strings on the "=" sign, if any
+
+        if (len(self.comment_strings) > 0):
+            max_indent = max([len(display_unicode(comment.split(u"=", 1)[0]))
+                              for comment in self.comment_strings
+                              if u"=" in comment])
+        else:
+            max_indent = 0
+
+        comment_strings = []
+        for comment in self.comment_strings:
+            if (u"=" in comment):
+                comment_strings.append(
+                    u" " * (4 + max_indent -
+                            len(display_unicode(comment.split(u"=", 1)[0]))) +
+                    comment)
+            else:
+                comment_strings.append(u" " * 4 + comment)
+
+        return linesep.decode('ascii').join(
+            [u"  VORBIS_COMMENT:",
+             u"    %s" % (self.vendor_string)] +
+            comment_strings)
+
+    @classmethod
+    def converted(cls, metadata):
+        """converts a MetaData object to a Flac_VORBISCOMMENT object"""
+
+        if ((metadata is None) or (isinstance(metadata, Flac_VORBISCOMMENT))):
+            return metadata
+        else:
+            #make VorbisComment do all the work,
+            #then lift its data into a new Flac_VORBISCOMMENT
+            metadata = VorbisComment.converted(metadata)
+            return cls(metadata.comment_strings,
+                       metadata.vendor_string)
+
+    @classmethod
+    def parse(cls, reader):
+        """returns this metadata block from a BitstreamReader"""
+
+        reader.set_endianness(1)
+        vendor_string = reader.read_bytes(reader.read(32)).decode('utf-8',
+                                                                  'replace')
+        return cls([reader.read_bytes(reader.read(32)).decode('utf-8',
+                                                              'replace')
+                    for i in xrange(reader.read(32))], vendor_string)
+
+    def build(self, writer):
+        """writes this metadata block to a BitstreamWriter"""
+
+        writer.set_endianness(1)
+        vendor_string = self.vendor_string.encode('utf-8')
+        writer.build("32u%db" % (len(vendor_string)),
+                     (len(vendor_string), vendor_string))
+        writer.write(32, len(self.comment_strings))
+        for comment_string in self.comment_strings:
+            comment_string = comment_string.encode('utf-8')
+            writer.build("32u%db" % (len(comment_string)),
+                         (len(comment_string), comment_string))
+        writer.set_endianness(0)
+
+    def size(self):
+        """the size of this metadata block
+        not including the 4-byte block header"""
+
+        from operator import add
+
+        return (4 + len(self.vendor_string.encode('utf-8')) +
+                4 +
+                reduce(add, [4 + len(comment.encode('utf-8'))
+                             for comment in self.comment_strings], 0))
+
+
+class Flac_CUESHEET:
+    BLOCK_ID = 5
+
+    def __init__(self, catalog_number, lead_in_samples, is_cdda, tracks):
+        self.catalog_number = catalog_number
+        self.lead_in_samples = lead_in_samples
+        self.is_cdda = is_cdda
+        self.tracks = tracks
+
+    def copy(self):
+        """returns a duplicate of this metadata block"""
+
+        return Flac_CUESHEET(self.catalog_number,
+                             self.lead_in_samples,
+                             self.is_cdda,
+                             [track.copy() for track in self.tracks])
+
+    def __eq__(self, cuesheet):
+        for attr in ["catalog_number",
+                     "lead_in_samples",
+                     "is_cdda",
+                     "tracks"]:
+            if ((not hasattr(cuesheet, attr)) or (getattr(self, attr) !=
+                                                  getattr(cuesheet, attr))):
+                return False
+        else:
+            return True
+
+    def __repr__(self):
+        return ("Flac_CUESHEET(%s)" %
+                ",".join(["%s=%s" % (key, repr(getattr(self, key)))
+                          for key in ["catalog_number",
+                                      "lead_in_samples",
+                                      "is_cdda",
+                                      "tracks"]]))
+
+    def raw_info(self):
+        """returns a human-readable version of this metadata block
+        as unicode"""
+
+        from os import linesep
+
+        return linesep.decode('ascii').join(
+            [u"  CUESHEET:",
+             u"     catalog number = %s" %
+             (self.catalog_number.decode('ascii', 'replace')),
+             u"    lead-in samples = %d" % (self.lead_in_samples),
+             u"            is CDDA = %d" % (self.is_cdda),
+             u"%9s %5s %8s %13s %12s" % (u"track",
+                                         u"audio",
+                                         u"pre-emph",
+                                         u"offset",
+                                         u"ISRC")] +
+            [track.raw_info() for track in self.tracks])
+
+    @classmethod
+    def parse(cls, reader):
+        """returns this metadata block from a BitstreamReader"""
+
+        (catalog_number,
+         lead_in_samples,
+         is_cdda,
+         track_count) = reader.parse("128b64U1u2071p8u")
+        return cls(catalog_number,
+                   lead_in_samples,
+                   is_cdda,
+                   [Flac_CUESHEET_track.parse(reader)
+                    for i in xrange(track_count)])
+
+    def build(self, writer):
+        """writes this metadata block to a BitstreamWriter"""
+
+        writer.build("128b64U1u2071p8u",
+                     (self.catalog_number,
+                      self.lead_in_samples,
+                      self.is_cdda,
+                      len(self.tracks)))
+        for track in self.tracks:
+            track.build(writer)
+
+    def size(self):
+        """the size of this metadata block
+        not including the 4-byte block header"""
+
+        from .bitstream import BitstreamAccumulator
+
+        a = BitstreamAccumulator(0)
+        self.build(a)
+        return a.bytes()
+
+    @classmethod
+    def converted(cls, sheet, total_frames, sample_rate=44100):
+        """converts a cuesheet compatible object to Flac_CUESHEET objects
+
+        a total_frames integer (in PCM frames) is also required
+        """
+
+        if (sheet.catalog() is None):
+            catalog_number = chr(0) * 128
+        else:
+            catalog_number = sheet.catalog() + (chr(0) *
+                                                (128 - len(sheet.catalog())))
+
+        ISRCs = sheet.ISRCs()
+
+        return cls(
+            catalog_number=catalog_number,
+            lead_in_samples=sample_rate * 2,
+            is_cdda=1 if sample_rate == 44100 else 0,
+            tracks=[Flac_CUESHEET_track(
+                    offset=indexes[0] * sample_rate / 75,
+                    number=i + 1,
+                    ISRC=ISRCs.get(i + 1, chr(0) * 12),
+                    track_type=0,
+                    pre_emphasis=0,
+                    index_points=[
+                        Flac_CUESHEET_index(
+                            offset=(index - indexes[0]) * sample_rate / 75,
+                            number=point_number + (1 if len(indexes) == 1
+                                                   else 0))
+                        for (point_number, index) in enumerate(indexes)])
+                    for (i, indexes) in enumerate(sheet.indexes())] +
+            # lead-out track
+            [Flac_CUESHEET_track(offset=total_frames,
+                                 number=170,
+                                 ISRC=chr(0) * 12,
+                                 track_type=0,
+                                 pre_emphasis=0,
+                                 index_points=[])])
+
+    def catalog(self):
+        """returns the cuesheet's catalog number as a plain string"""
+
+        catalog_number = self.catalog_number.rstrip(chr(0))
+
+        if (len(catalog_number) > 0):
+            return catalog_number
+        else:
+            return None
+
+    def ISRCs(self):
+        """returns a dict of ISRC values as plain strings"""
+
+        return dict([(track.number, track.ISRC) for track in
+                     self.tracks
+                     if ((track.number != 170) and
+                         (len(track.ISRC.strip(chr(0))) > 0))])
+
+    def indexes(self, sample_rate=44100):
+        """returns a list of (start, end) integer tuples"""
+
+        return [tuple([(index.offset + track.offset) * 75 / sample_rate
+                       for index in
+                       sorted(track.index_points,
+                              lambda i1, i2: cmp(i1.number, i2.number))])
+                for track in
+                sorted(self.tracks, lambda t1, t2: cmp(t1.number, t2.number))
+                if (track.number != 170)]
+
+    def pcm_lengths(self, total_length, sample_rate):
+        """returns a list of PCM lengths for all cuesheet audio tracks
+
+        note that the total_length and sample_rate variables
+        are only for compatibility
+        as FLAC's CUESHEET blocks store sample counts directly
+        """
+
+        if (len(self.tracks) > 0):
+            return [(current.offset +
+                     max([i.offset for i in current.index_points] + [0])) -
+                    ((previous.offset +
+                      max([i.offset for i in previous.index_points] + [0])))
+                    for (previous, current) in
+                    zip(self.tracks, self.tracks[1:])]
+        else:
+            return []
+
+
+class Flac_CUESHEET_track:
+    def __init__(self, offset, number, ISRC, track_type, pre_emphasis,
+                 index_points):
+        self.offset = offset
+        self.number = number
+        self.ISRC = ISRC
+        self.track_type = track_type
+        self.pre_emphasis = pre_emphasis
+        self.index_points = index_points
+
+    def copy(self):
+        """returns a duplicate of this metadata block"""
+
+        return Flac_CUESHEET_track(self.offset,
+                                   self.number,
+                                   self.ISRC,
+                                   self.track_type,
+                                   self.pre_emphasis,
+                                   [index.copy() for index in
+                                    self.index_points])
+
+    def __repr__(self):
+        return ("Flac_CUESHEET_track(%s)" %
+                ",".join(["%s=%s" % (key, repr(getattr(self, key)))
+                          for key in ["offset",
+                                      "number",
+                                      "ISRC",
+                                      "track_type",
+                                      "pre_emphasis",
+                                      "index_points"]]))
+
+    def raw_info(self):
+        """returns a human-readable version of this track as unicode"""
+
+        if (len(self.ISRC.strip(chr(0))) > 0):
+            return u"%9.d %5s %8s %13.d %12s" % \
+                (self.number,
+                 u"yes" if self.track_type == 0 else u"no",
+                 u"yes" if self.pre_emphasis == 1 else u"no",
+                 self.offset,
+                 self.ISRC)
+        else:
+            return u"%9.d %5s %8s %13.d" % \
+                (self.number,
+                 u"yes" if self.track_type == 0 else u"no",
+                 u"yes" if self.pre_emphasis == 1 else u"no",
+                 self.offset)
+
+    def __eq__(self, track):
+        for attr in ["offset",
+                     "number",
+                     "ISRC",
+                     "track_type",
+                     "pre_emphasis",
+                     "index_points"]:
+            if ((not hasattr(track, attr)) or (getattr(self, attr) !=
+                                               getattr(track, attr))):
+                return False
+        else:
+            return True
+
+    @classmethod
+    def parse(cls, reader):
+        """returns this cuesheet track from a BitstreamReader"""
+
+        (offset,
+         number,
+         ISRC,
+         track_type,
+         pre_emphasis,
+         index_points) = reader.parse("64U8u12b1u1u110p8u")
+        return cls(offset, number, ISRC, track_type, pre_emphasis,
+                   [Flac_CUESHEET_index.parse(reader)
+                    for i in xrange(index_points)])
+
+    def build(self, writer):
+        """writes this cuesheet track to a BitstreamWriter"""
+
+        writer.build("64U8u12b1u1u110p8u",
+                     (self.offset,
+                      self.number,
+                      self.ISRC,
+                      self.track_type,
+                      self.pre_emphasis,
+                      len(self.index_points)))
+        for index_point in self.index_points:
+            index_point.build(writer)
+
+
+class Flac_CUESHEET_index:
+    def __init__(self, offset, number):
+        self.offset = offset
+        self.number = number
+
+    def copy(self):
+        """returns a duplicate of this metadata block"""
+
+        return Flac_CUESHEET_index(self.offset, self.number)
+
+    def __repr__(self):
+        return "Flac_CUESHEET_index(%s, %s)" % (repr(self.offset),
+                                                repr(self.number))
+
+    def __eq__(self, index):
+        try:
+            return ((self.offset == index.offset) and
+                    (self.number == index.number))
+        except AttributeError:
+            return False
+
+    @classmethod
+    def parse(cls, reader):
+        """returns this cuesheet index from a BitstreamReader"""
+
+        (offset, number) = reader.parse("64U8u24p")
+
+        return cls(offset, number)
+
+    def build(self, writer):
+        """writes this cuesheet index to a BitstreamWriter"""
+
+        writer.build("64U8u24p", (self.offset, self.number))
+
+
+class Flac_PICTURE(Image):
+    BLOCK_ID = 6
+
+    def __init__(self, picture_type, mime_type, description,
+                 width, height, color_depth, color_count, data):
+        self.__dict__["data"] = data
+        self.__dict__["mime_type"] = mime_type
+        self.__dict__["width"] = width
+        self.__dict__["height"] = height
+        self.__dict__["color_depth"] = color_depth
+        self.__dict__["color_count"] = color_count
+        self.__dict__["description"] = description
+        self.__dict__["picture_type"] = picture_type
+
+    def copy(self):
+        """returns a duplicate of this metadata block"""
+
+        return Flac_PICTURE(self.picture_type,
+                            self.mime_type,
+                            self.description,
+                            self.width,
+                            self.height,
+                            self.color_depth,
+                            self.color_count,
+                            self.data)
+
+    def __getattr__(self, key):
+        if (key == "type"):
+            #convert FLAC picture_type to Image type
+            #
+            # | Item         | FLAC Picture ID | Image type |
+            # |--------------+-----------------+------------|
+            # | Other        |               0 |          4 |
+            # | Front Cover  |               3 |          0 |
+            # | Back Cover   |               4 |          1 |
+            # | Leaflet Page |               5 |          2 |
+            # | Media        |               6 |          3 |
+
+            return {0: 4, 3: 0, 4: 1, 5: 2, 6: 3}.get(self.picture_type, 4)
+        else:
+            try:
+                return self.__dict__[key]
+            except KeyError:
+                raise AttributeError(key)
+
+    def __setattr__(self, key, value):
+        if (key == "type"):
+            #convert Image type to FLAC picture_type
+            #
+            # | Item         | Image type | FLAC Picture ID |
+            # |--------------+------------+-----------------|
+            # | Other        |          4 |               0 |
+            # | Front Cover  |          0 |               3 |
+            # | Back Cover   |          1 |               4 |
+            # | Leaflet Page |          2 |               5 |
+            # | Media        |          3 |               6 |
+
+            self.picture_type = {4: 0, 0: 3, 1: 4, 2: 5, 3: 6}.get(value, 0)
+        else:
+            self.__dict__[key] = value
+
+    def __repr__(self):
+        return ("Flac_PICTURE(%s)" %
+                ",".join(["%s=%s" % (key, repr(getattr(self, key)))
+                          for key in ["picture_type",
+                                      "mime_type",
+                                      "description",
+                                      "width",
+                                      "height",
+                                      "color_depth",
+                                      "color_count"]]))
+
+    def raw_info(self):
+        """returns a human-readable version of this metadata block
+        as unicode"""
+
+        from os import linesep
+
+        return linesep.decode('ascii').join(
+            [u"  PICTURE:",
+             u"    picture type = %d" % (self.picture_type),
+             u"       MIME type = %s" % (self.mime_type),
+             u"     description = %s" % (self.description),
+             u"           width = %d" % (self.width),
+             u"          height = %d" % (self.height),
+             u"     color depth = %d" % (self.color_depth),
+             u"     color count = %d" % (self.color_count),
+             u"           bytes = %d" % (len(self.data))])
+
+    @classmethod
+    def parse(cls, reader):
+        """returns this metadata block from a BitstreamReader"""
+
+        return cls(
+            picture_type=reader.read(32),
+            mime_type=reader.read_bytes(reader.read(32)).decode('ascii'),
+            description=reader.read_bytes(reader.read(32)).decode('utf-8'),
+            width=reader.read(32),
+            height=reader.read(32),
+            color_depth=reader.read(32),
+            color_count=reader.read(32),
+            data=reader.read_bytes(reader.read(32)))
+
+    def build(self, writer):
+        """writes this metadata block to a BitstreamWriter"""
+
+        writer.build("32u [ 32u%db ] [32u%db ] 32u 32u 32u 32u [ 32u%db ]" %
+                     (len(self.mime_type.encode('ascii')),
+                      len(self.description.encode('utf-8')),
+                      len(self.data)),
+                     (self.picture_type,
+                      len(self.mime_type.encode('ascii')),
+                      self.mime_type.encode('ascii'),
+                      len(self.description.encode('utf-8')),
+                      self.description.encode('utf-8'),
+                      self.width,
+                      self.height,
+                      self.color_depth,
+                      self.color_count,
+                      len(self.data),
+                      self.data))
+
+    def size(self):
+        """the size of this metadata block
+        not including the 4-byte block header"""
+
+        from .bitstream import format_size
+
+        return format_size(
+            "32u [ 32u%db ] [32u%db ] 32u 32u 32u 32u [ 32u%db ]" %
+            (len(self.mime_type.encode('ascii')),
+             len(self.description.encode('utf-8')),
+             len(self.data))) / 8
+
+    @classmethod
+    def converted(cls, image):
+        """converts an Image object to a FlacPictureComment"""
+
+        return cls(
+            picture_type={4: 0, 0: 3, 1: 4, 2: 5, 3: 6}.get(image.type, 0),
+            mime_type=image.mime_type,
+            description=image.description,
+            width=image.width,
+            height=image.height,
+            color_depth=image.color_depth,
+            color_count=image.color_count,
+            data=image.data)
+
+    def type_string(self):
+        """returns the image's type as a human readable plain string
+
+        for example, an image of type 0 returns "Front Cover"
+        """
+
+        return {0: "Other",
+                1: "File icon",
+                2: "Other file icon",
+                3: "Cover (front)",
+                4: "Cover (back)",
+                5: "Leaflet page",
+                6: "Media",
+                7: "Lead artist / lead performer / soloist",
+                8: "Artist / Performer",
+                9: "Conductor",
+                10: "Band / Orchestra",
+                11: "Composer",
+                12: "Lyricist / Text writer",
+                13: "Recording Location",
+                14: "During recording",
+                15: "During performance",
+                16: "Movie / Video screen capture",
+                17: "A bright colored fish",
+                18: "Illustration",
+                19: "Band/Artist logotype",
+                20: "Publisher / Studio logotype"}.get(self.picture_type,
+                                                       "Other")
+
+    def clean(self, fixes_performed):
+        from .image import image_metrics
+
+        img = image_metrics(self.data)
+
+        if (((self.mime_type != img.mime_type) or
+             (self.width != img.width) or
+             (self.height != img.height) or
+             (self.color_depth != img.bits_per_pixel) or
+             (self.color_count != img.color_count))):
+            from .text import CLEAN_FIX_IMAGE_FIELDS
+            fixes_performed.append(CLEAN_FIX_IMAGE_FIELDS)
+            return self.__class__.converted(
+                Image(type=self.type,
+                      mime_type=img.mime_type,
+                      description=self.description,
+                      width=img.width,
+                      height=img.height,
+                      color_depth=img.bits_per_pixel,
+                      color_count=img.color_count,
+                      data=self.data))
+        else:
+            return self
+
+
+class FlacAudio(WaveContainer, AiffContainer):
+    """a Free Lossless Audio Codec file"""
+
+    from .text import (COMP_FLAC_0,
+                       COMP_FLAC_8)
+
+    SUFFIX = "flac"
+    NAME = SUFFIX
+    DESCRIPTION = u"Free Lossless Audio Codec"
+    DEFAULT_COMPRESSION = "8"
+    COMPRESSION_MODES = tuple(map(str, range(0, 9)))
+    COMPRESSION_DESCRIPTIONS = {"0": COMP_FLAC_0,
+                                "8": COMP_FLAC_8}
+
+    METADATA_CLASS = FlacMetaData
+
+    def __init__(self, filename):
+        """filename is a plain string"""
+
+        AudioFile.__init__(self, filename)
+        self.__samplerate__ = 0
+        self.__channels__ = 0
+        self.__bitspersample__ = 0
+        self.__total_frames__ = 0
+        self.__stream_offset__ = 0
+        self.__md5__ = chr(0) * 16
 
         try:
-            header = FlacReader.FRAME_HEADER.parse_stream(self.bitstream)
-        except Con.core.FieldError:
-            return ""
+            self.__read_streaminfo__()
+        except IOError, msg:
+            raise InvalidFLAC(str(msg))
 
-        if (header.sync != 0x3FFE):
-            raise FlacStreamException('invalid sync')
+    def channel_mask(self):
+        """returns a ChannelMask object of this track's channel layout"""
 
-        if (crc8(self.stream.getvalue()[0:-1]) != header.crc8):
-            raise FlacStreamException('crc8 checksum failed')
+        from . import ChannelMask
 
+        if (self.channels() <= 2):
+            return ChannelMask.from_channels(self.channels())
 
-        #block_size tells us how many samples we need from each subframe
-        block_size = FlacReader.BLOCK_SIZE[header.block_size]
-        if (block_size == self.GET_BLOCKSIZE_FROM_STREAMINFO):
-            block_size = self.streaminfo.maximum_blocksize
-
-        elif ((block_size == self.GET_8BIT_BLOCKSIZE_FROM_END_OF_HEADER) or
-              (block_size == self.GET_16BIT_BLOCKSIZE_FROM_END_OF_HEADER)):
-            block_size = header.extended_block_size + 1
-
-
-        #grab subframe data as 32-bit array objects
-        subframe_data = []
-
-        for channel_number in xrange(header.total_channels):
-            subframe_data.append(
-                self.read_subframe(header, block_size, channel_number))
-
-        crc16sum = crc16(self.stream.getvalue())
-
-
-        #try to byte-align the stream
-        if (len(self.bitstream.buffer) > 0):
-            self.bitstream.read(len(self.bitstream.buffer))
-
-
-        if (crc16sum != Con.Bits('crc16',16).parse_stream(self.bitstream)):
-            raise FlacStreamException('crc16 checksum failed')
-
-
-        #convert our list of subframe data arrays into
-        #a string of sample data
-        if (FlacReader.SAMPLE_SIZE[header.bits_per_sample] == 16):
-            merged_frames = array.array('h',
-                                        FlacReader.CHANNEL_FUNCTIONS[
-                header.channel_assignment](subframe_data))
-
-            if (audiotools.BIG_ENDIAN):
-                merged_frames.byteswap()
-
-            return merged_frames.tostring()
-
-        elif (FlacReader.SAMPLE_SIZE[header.bits_per_sample] == 8):
-            merged_frames = array.array('b',
-                                        FlacReader.CHANNEL_FUNCTIONS[
-                header.channel_assignment](subframe_data))
-
-            return merged_frames.tostring()
-
-        else:
-            if (FlacReader.SAMPLE_SIZE[header.bits_per_sample] == \
-                self.GET_SAMPLE_SIZE_FROM_STREAMINFO):
-                bits_per_sample = self.streaminfo.bits_per_sample + 1
-
-            elif (FlacReader.SAMPLE_SIZE[header.bits_per_sample] == None):
-                raise FlacStreamException('invalid bits per sample')
-
+        try:
+            metadata = self.get_metadata()
+            if (metadata is not None):
+                return ChannelMask(
+                    int(metadata.get_block(
+                        Flac_VORBISCOMMENT.BLOCK_ID)[
+                            u"WAVEFORMATEXTENSIBLE_CHANNEL_MASK"][0], 16))
             else:
-                bits_per_sample = FlacReader.SAMPLE_SIZE[header.bits_per_sample]
+                #proceed to generate channel mask
+                raise ValueError()
+        except (IndexError, KeyError, ValueError):
+            #if there is no VORBIS_COMMENT block
+            #or no WAVEFORMATEXTENSIBLE_CHANNEL_MASK in that block
+            #or it's not an integer,
+            #use FLAC's default mask based on channels
+            if (self.channels() == 3):
+                return ChannelMask.from_fields(
+                    front_left=True, front_right=True, front_center=True)
+            elif (self.channels() == 4):
+                return ChannelMask.from_fields(
+                    front_left=True, front_right=True,
+                    back_left=True, back_right=True)
+            elif (self.channels() == 5):
+                return ChannelMask.from_fields(
+                    front_left=True, front_right=True, front_center=True,
+                    back_left=True, back_right=True)
+            elif (self.channels() == 6):
+                return ChannelMask.from_fields(
+                    front_left=True, front_right=True, front_center=True,
+                    back_left=True, back_right=True,
+                    low_frequency=True)
+            else:
+                return ChannelMask(0)
 
-            stream = Con.GreedyRepeater(
-                Con.BitStruct('bits',
-                              Con.Bits('value',bits_per_sample,
-                                       swapped=True,signed=True)))
+    def lossless(self):
+        """returns True"""
 
-            return stream.build(
-                [Con.Container(value=v) for v in
-                 FlacReader.CHANNEL_FUNCTIONS[header.channel_assignment](
-                    subframe_data)])
+        return True
 
+    def get_metadata(self):
+        """returns a MetaData object, or None
 
+        raises IOError if unable to read the file"""
 
-    def read_subframe(self, frame_header, block_size, channel_number):
-        subframe_header = \
-                        FlacReader.SUBFRAME_HEADER.parse_stream(self.bitstream)
+        #FlacAudio *always* returns a FlacMetaData object
+        #even if the blocks aren't present
+        #so there's no need to test for None
 
-        #figure out the bits-per-sample of this subframe
-        if ((frame_header.channel_assignment == 8) and
-            (channel_number == 1)):
-            #if channel is stored as left+difference
-            #and this is the difference, add 1 bit
-            bits_per_sample = FlacReader.SAMPLE_SIZE[
-                frame_header.bits_per_sample] + 1
+        f = file(self.filename, 'rb')
+        try:
+            f.seek(self.__stream_offset__, 0)
+            if (f.read(4) != 'fLaC'):
+                return None
+            else:
+                from .bitstream import BitstreamReader
 
-        elif ((frame_header.channel_assignment == 9) and
-              (channel_number == 0)):
-            #if channel is stored as difference+right
-            #and this is the difference, add 1 bit
-            bits_per_sample = FlacReader.SAMPLE_SIZE[
-                frame_header.bits_per_sample] + 1
+                return FlacMetaData.parse(BitstreamReader(f, 0))
+        finally:
+            f.close()
 
-        elif ((frame_header.channel_assignment == 10) and
-              (channel_number == 1)):
-            #if channel is stored as average+difference
-            #and this is the difference, add 1 bit
-            bits_per_sample = FlacReader.SAMPLE_SIZE[
-                frame_header.bits_per_sample] + 1
+    def update_metadata(self, metadata):
+        """takes this track's current MetaData object
+        as returned by get_metadata() and sets this track's metadata
+        with any fields updated in that object
 
+        raises IOError if unable to write the file
+        """
+
+        from .bitstream import BitstreamWriter
+        from .bitstream import BitstreamAccumulator
+        from .bitstream import BitstreamReader
+        from operator import add
+
+        if (metadata is None):
+            return
+
+        if (not isinstance(metadata, FlacMetaData)):
+            from .text import ERR_FOREIGN_METADATA
+            raise ValueError(ERR_FOREIGN_METADATA)
+
+        has_padding = len(metadata.get_blocks(Flac_PADDING.BLOCK_ID)) > 0
+
+        if (has_padding):
+            total_padding_size = sum(
+                [b.size() for b in metadata.get_blocks(Flac_PADDING.BLOCK_ID)])
         else:
-            #otherwise, use the number from the frame header
-            bits_per_sample = FlacReader.SAMPLE_SIZE[
-                frame_header.bits_per_sample]
+            total_padding_size = 0
 
+        metadata_delta = metadata.size() - self.metadata_length()
 
-        if (subframe_header.has_wasted_bits_per_sample):
-            bits_per_sample -= subframe_header.wasted_bits_per_sample
+        if (has_padding and (metadata_delta <= total_padding_size)):
+            #if padding size is larger than change in metadata
+            #shrink padding blocks so that new size matches old size
+            #(if metadata_delta is negative,
+            # this will enlarge padding blocks as necessary)
 
-        if (subframe_header.subframe_type == 0):
-            subframe = self.read_subframe_constant(block_size, bits_per_sample)
+            for padding in metadata.get_blocks(Flac_PADDING.BLOCK_ID):
+                if (metadata_delta > 0):
+                    #extract bytes from PADDING blocks
+                    #until the metadata_delta is exhausted
+                    if (metadata_delta <= padding.length):
+                        padding.length -= metadata_delta
+                        metadata_delta = 0
+                    else:
+                        metadata_delta -= padding.length
+                        padding.length = 0
+                elif (metadata_delta < 0):
+                    #dump all our new bytes into the first PADDING block found
+                    padding.length -= metadata_delta
+                    metadata_delta = 0
+                else:
+                    break
 
-        elif (subframe_header.subframe_type == 1):
-            subframe = self.read_subframe_verbatim(block_size, bits_per_sample)
-
-        elif ((subframe_header.subframe_type & 0x38) == 0x08):
-            subframe = self.read_subframe_fixed(
-                subframe_header.subframe_type & 0x07,
-                block_size,
-                bits_per_sample)
-
-        elif ((subframe_header.subframe_type & 0x20) == 0x20):
-            subframe = self.read_subframe_lpc(
-                (subframe_header.subframe_type & 0x1F) + 1,
-                block_size,
-                bits_per_sample)
-
+            #then overwrite the beginning of the file
+            stream = file(self.filename, 'r+b')
+            stream.write('fLaC')
+            metadata.build(BitstreamWriter(stream, 0))
+            stream.close()
         else:
-            raise FlacStreamException('invalid subframe type')
+            #if padding is smaller than change in metadata,
+            #or file has no padding,
+            #rewrite entire file to fit new metadata
 
-        if (subframe_header.has_wasted_bits_per_sample):
-            return array.array(
-                'i',
-                [i << subframe_header.wasted_bits_per_sample
-                 for i in subframe])
+            import tempfile
+            from . import transfer_data
+
+            stream = file(self.filename, 'rb')
+            stream.seek(self.__stream_offset__, 0)
+
+            if (stream.read(4) != 'fLaC'):
+                from .text import ERR_FLAC_INVALID_FILE
+                raise InvalidFLAC(ERR_FLAC_INVALID_FILE)
+
+            #skip the existing metadata blocks
+            stop = 0
+            reader = BitstreamReader(stream, 0)
+            while (stop == 0):
+                (stop, length) = reader.parse("1u 7p 24u")
+                reader.skip_bytes(length)
+
+            #write the remaining data stream to a temp file
+            file_data = tempfile.TemporaryFile()
+            transfer_data(stream.read, file_data.write)
+            file_data.seek(0, 0)
+
+            #finally, rebuild our file using new metadata and old stream
+            stream = file(self.filename, 'wb')
+            stream.write('fLaC')
+            writer = BitstreamWriter(stream, 0)
+            metadata.build(writer)
+            writer.flush()
+            transfer_data(file_data.read, stream.write)
+            file_data.close()
+            stream.close()
+
+    def set_metadata(self, metadata):
+        """takes a MetaData object and sets this track's metadata
+
+        this metadata includes track name, album name, and so on
+        raises IOError if unable to read or write the file"""
+
+        new_metadata = self.METADATA_CLASS.converted(metadata)
+
+        if (new_metadata is None):
+            return
+
+        old_metadata = self.get_metadata()
+        if (old_metadata is None):
+            #this shouldn't happen
+            old_metadata = FlacMetaData([])
+
+        #replace old metadata's VORBIS_COMMENT with one from new metadata
+        #(if any)
+        if (new_metadata.has_block(Flac_VORBISCOMMENT.BLOCK_ID)):
+            new_vorbiscomment = new_metadata.get_block(
+                Flac_VORBISCOMMENT.BLOCK_ID)
+
+            if (old_metadata.has_block(Flac_VORBISCOMMENT.BLOCK_ID)):
+                #both new and old metadata has a VORBIS_COMMENT block
+
+                old_vorbiscomment = old_metadata.get_block(
+                    Flac_VORBISCOMMENT.BLOCK_ID)
+
+                #update vendor string from our current VORBIS_COMMENT block
+                new_vorbiscomment.vendor_string = \
+                    old_vorbiscomment.vendor_string
+
+                #update REPLAYGAIN_* tags from our current VORBIS_COMMENT block
+                for key in [u"REPLAYGAIN_TRACK_GAIN",
+                            u"REPLAYGAIN_TRACK_PEAK",
+                            u"REPLAYGAIN_ALBUM_GAIN",
+                            u"REPLAYGAIN_ALBUM_PEAK",
+                            u"REPLAYGAIN_REFERENCE_LOUDNESS"]:
+                    try:
+                        new_vorbiscomment[key] = old_vorbiscomment[key]
+                    except KeyError:
+                        new_vorbiscomment[key] = []
+
+                #update WAVEFORMATEXTENSIBLE_CHANNEL_MASK
+                #from our current VORBIS_COMMENT block, if any
+                if (((self.channels() > 2) or
+                     (self.bits_per_sample() > 16)) and
+                    (u"WAVEFORMATEXTENSIBLE_CHANNEL_MASK" in
+                     old_vorbiscomment.keys())):
+                    new_vorbiscomment[u"WAVEFORMATEXTENSIBLE_CHANNEL_MASK"] = \
+                        old_vorbiscomment[u"WAVEFORMATEXTENSIBLE_CHANNEL_MASK"]
+                elif (u"WAVEFORMATEXTENSIBLE_CHANNEL_MASK" in
+                      new_vorbiscomment.keys()):
+                    new_vorbiscomment[
+                        u"WAVEFORMATEXTENSIBLE_CHANNEL_MASK"] = []
+
+                old_metadata.replace_blocks(Flac_VORBISCOMMENT.BLOCK_ID,
+                                            [new_vorbiscomment])
+            else:
+                #new metadata has VORBIS_COMMENT block,
+                #but old metadata does not
+
+                #remove REPLAYGAIN_* tags from new VORBIS_COMMENT block
+                for key in [u"REPLAYGAIN_TRACK_GAIN",
+                            u"REPLAYGAIN_TRACK_PEAK",
+                            u"REPLAYGAIN_ALBUM_GAIN",
+                            u"REPLAYGAIN_ALBUM_PEAK",
+                            u"REPLAYGAIN_REFERENCE_LOUDNESS"]:
+                    new_vorbiscomment[key] = []
+
+                #update WAVEFORMATEXTENSIBLE_CHANNEL_MASK
+                #from our actual mask if necessary
+                if ((self.channels() > 2) or (self.bits_per_sample() > 16)):
+                    new_vorbiscomment[u"WAVEFORMATEXTENSIBLE_CHANNEL_MASK"] = [
+                        u"0x%.4X" % (self.channel_mask())]
+
+                old_metadata.add_block(new_vorbiscomment)
         else:
-            return subframe
+            #new metadata has no VORBIS_COMMENT block
+            pass
 
-    def read_subframe_constant(self, block_size, bits_per_sample):
-        sample = Con.Bits('b',bits_per_sample).parse_stream(
-            self.bitstream)
+        #replace old metadata's PICTURE blocks with those from new metadata
+        old_metadata.replace_blocks(
+            Flac_PICTURE.BLOCK_ID,
+            new_metadata.get_blocks(Flac_PICTURE.BLOCK_ID))
 
-        subframe = array.array('i',[sample] * block_size)
+        #everything else remains as-is
 
-        return subframe
+        self.update_metadata(old_metadata)
 
+    def metadata_length(self):
+        """returns the length of all FLAC metadata blocks as an integer
 
-    def read_subframe_verbatim(self, block_size, bits_per_sample):
-        return array.array('i',
-                           Con.StrictRepeater(
-            block_size,
-            Con.Bits("samples",
-                     bits_per_sample,
-                     signed=True)).parse_stream(self.bitstream))
+        not including the 4 byte "fLaC" file header"""
 
+        from .bitstream import BitstreamReader
 
-    def read_subframe_fixed(self, order, block_size, bits_per_sample):
-        samples = Con.StrictRepeater(
-            order,
-            Con.Bits("warm_up_samples",
-                     bits_per_sample,
-                     signed=True))
+        counter = 0
+        f = file(self.filename, 'rb')
+        try:
+            f.seek(self.__stream_offset__, 0)
+            reader = BitstreamReader(f, 0)
 
-        subframe = array.array('i',
-                               samples.parse_stream(self.bitstream))
+            if (reader.read_bytes(4) != 'fLaC'):
+                from .text import ERR_FLAC_INVALID_FILE
+                raise InvalidFLAC(ERR_FLAC_INVALID_FILE)
 
-        residual = self.read_residual(block_size,order)
+            stop = 0
+            while (stop == 0):
+                (stop, block_id, length) = reader.parse("1u 7u 24u")
+                counter += 4
 
-        fixed_func = self.FIXED_FUNCTIONS[order]
+                reader.skip_bytes(length)
+                counter += length
 
-        for i in xrange(len(subframe),block_size):
-            fixed_func(subframe,residual,i)
+            return counter
+        finally:
+            f.close()
 
-        return subframe
+    def delete_metadata(self):
+        """deletes the track's MetaData
 
+        this removes or unsets tags as necessary in order to remove all data
+        raises IOError if unable to write the file"""
 
-    def read_subframe_lpc(self, order, block_size, bits_per_sample):
-        samples = Con.StrictRepeater(
-            order,
-            Con.Bits("warm_up_samples",
-                     bits_per_sample,
-                     signed=True))
+        self.set_metadata(MetaData())
 
-        subframe = array.array('i',
-                               samples.parse_stream(self.bitstream))
+    @classmethod
+    def __block_ids__(cls, flacfile):
+        """yields a block_id int per metadata block
 
-        lpc_precision = Con.Bits('lpc_precision',
-                                 4).parse_stream(self.bitstream) + 1
+        raises ValueError if a block_id is invalid
+        """
 
-        lpc_shift = Con.Bits('lpc_shift',
-                             5).parse_stream(self.bitstream)
+        valid_block_ids = frozenset(range(0, 6 + 1))
+        from .bitstream import BitstreamReader
+        reader = BitstreamReader(flacfile, 0)
+        stop = 0
+        while (stop == 0):
+            (stop, block_id, length) = reader.parse("1u 7u 24u")
+            if (block_id in valid_block_ids):
+                yield block_id
+            else:
+                from .text import ERR_FLAC_INVALID_BLOCK
+                raise ValueError(ERR_FLAC_INVALID_BLOCK)
+            reader.skip_bytes(length)
 
-        coefficients = array.array('i',
-                                   Con.StrictRepeater(
-            order,
-            Con.Bits('coefficients',
-                     lpc_precision,
-                     signed=True)).parse_stream(self.bitstream))
+    def set_cuesheet(self, cuesheet):
+        """imports cuesheet data from a Cuesheet-compatible object
 
-        residual = self.read_residual(block_size, order)
+        this are objects with catalog(), ISRCs(), indexes(), and pcm_lengths()
+        methods.  Raises IOError if an error occurs setting the cuesheet"""
 
-        for i in xrange(len(subframe),block_size):
-            subframe.insert(i,
-                            (sum(
-                [coefficients[j] * subframe[i - j - 1] for j in
-                 xrange(0,len(coefficients))]) >> lpc_shift) + \
-                            residual[i])
+        if (cuesheet is not None):
+            metadata = self.get_metadata()
+            if (metadata is not None):
+                metadata.add_block(
+                    Flac_CUESHEET.converted(
+                        cuesheet, self.total_frames(), self.sample_rate()))
+                self.update_metadata(metadata)
 
-        return subframe
+    def get_cuesheet(self):
+        """returns the embedded Cuesheet-compatible object, or None
 
+        raises IOError if a problem occurs when reading the file"""
 
-    def read_residual(self, block_size, predictor_order):
-        rice = array.array('i')
+        try:
+            metadata = self.get_metadata()
+            if (metadata is not None):
+                return metadata.get_block(Flac_CUESHEET.BLOCK_ID)
+            else:
+                return None
+        except IndexError:
+            return None
 
-        #add some dummy rice so that the Rice index matches
-        #that of the rest of the subframe
-        for i in xrange(predictor_order):
-            rice.append(0)
+    def to_pcm(self):
+        """returns a PCMReader object containing the track's PCM data"""
 
-        coding_method = self.bitstream.read(2)
-        if (coding_method == '\x00\x00'):
-            rice2 = False
-        elif (coding_method == '\x00\x01'):
-            rice2 = True
+        from . import decoders
+        from . import PCMReaderError
+
+        try:
+            return decoders.FlacDecoder(self.filename,
+                                        self.channel_mask(),
+                                        self.__stream_offset__)
+        except (IOError, ValueError), msg:
+            #The only time this is likely to occur is
+            #if the FLAC is modified between when FlacAudio
+            #is initialized and when to_pcm() is called.
+            return PCMReaderError(error_message=str(msg),
+                                  sample_rate=self.sample_rate(),
+                                  channels=self.channels(),
+                                  channel_mask=int(self.channel_mask()),
+                                  bits_per_sample=self.bits_per_sample())
+
+    @classmethod
+    def from_pcm(cls, filename, pcmreader, compression=None,
+                 encoding_function=None):
+        """encodes a new file from PCM data
+
+        takes a filename string, PCMReader object
+        and optional compression level string
+        encodes a new audio file from pcmreader's data
+        at the given filename with the specified compression level
+        and returns a new FlacAudio object"""
+
+        from .encoders import encode_flac
+        from . import EncodingError
+        from . import UnsupportedChannelCount
+        from . import BufferedPCMReader
+        from . import __default_quality__
+
+        if ((compression is None) or (compression not in
+                                      cls.COMPRESSION_MODES)):
+            compression = __default_quality__(cls.NAME)
+
+        encoding_options = {
+            "0": {"block_size": 1152,
+                  "max_lpc_order": 0,
+                  "min_residual_partition_order": 0,
+                  "max_residual_partition_order": 3},
+            "1": {"block_size": 1152,
+                  "max_lpc_order": 0,
+                  "adaptive_mid_side": True,
+                  "min_residual_partition_order": 0,
+                  "max_residual_partition_order": 3},
+            "2": {"block_size": 1152,
+                  "max_lpc_order": 0,
+                  "exhaustive_model_search": True,
+                  "min_residual_partition_order": 0,
+                  "max_residual_partition_order": 3},
+            "3": {"block_size": 4096,
+                  "max_lpc_order": 6,
+                  "min_residual_partition_order": 0,
+                  "max_residual_partition_order": 4},
+            "4": {"block_size": 4096,
+                  "max_lpc_order": 8,
+                  "adaptive_mid_side": True,
+                  "min_residual_partition_order": 0,
+                  "max_residual_partition_order": 4},
+            "5": {"block_size": 4096,
+                  "max_lpc_order": 8,
+                  "mid_side": True,
+                  "min_residual_partition_order": 0,
+                  "max_residual_partition_order": 5},
+            "6": {"block_size": 4096,
+                  "max_lpc_order": 8,
+                  "mid_side": True,
+                  "min_residual_partition_order": 0,
+                  "max_residual_partition_order": 6},
+            "7": {"block_size": 4096,
+                  "max_lpc_order": 8,
+                  "mid_side": True,
+                  "exhaustive_model_search": True,
+                  "min_residual_partition_order": 0,
+                  "max_residual_partition_order": 6},
+            "8": {"block_size": 4096,
+                  "max_lpc_order": 12,
+                  "mid_side": True,
+                  "exhaustive_model_search": True,
+                  "min_residual_partition_order": 0,
+                  "max_residual_partition_order": 6}}[compression]
+
+        if (pcmreader.channels > 8):
+            raise UnsupportedChannelCount(filename, pcmreader.channels)
+
+        if (int(pcmreader.channel_mask) == 0):
+            if (pcmreader.channels <= 6):
+                channel_mask = {1: 0x0004,
+                                2: 0x0003,
+                                3: 0x0007,
+                                4: 0x0033,
+                                5: 0x0037,
+                                6: 0x003F}[pcmreader.channels]
+            else:
+                channel_mask = 0
+
+        elif (int(pcmreader.channel_mask) not in
+              (0x0001,    # 1ch - mono
+               0x0004,    # 1ch - mono
+               0x0003,    # 2ch - left, right
+               0x0007,    # 3ch - left, right, center
+               0x0033,    # 4ch - left, right, back left, back right
+               0x0603,    # 4ch - left, right, side left, side right
+               0x0037,    # 5ch - L, R, C, back left, back right
+               0x0607,    # 5ch - L, R, C, side left, side right
+               0x003F,    # 6ch - L, R, C, LFE, back left, back right
+               0x060F)):  # 6ch - L, R, C, LFE, side left, side right
+            from . import UnsupportedChannelMask
+
+            raise UnsupportedChannelMask(filename,
+                                         int(pcmreader.channel_mask))
         else:
-            raise FlacStreamException('invalid residual coding method')
+            channel_mask = int(pcmreader.channel_mask)
 
-        partition_order = Con.Bits('partition_order',4).parse_stream(
-            self.bitstream)
+        try:
+            offsets = (encode_flac if encoding_function is None
+                       else encoding_function)(filename,
+                                               pcmreader=
+                                               BufferedPCMReader(pcmreader),
+                                               **encoding_options)
+            flac = FlacAudio(filename)
+            metadata = flac.get_metadata()
+            assert(metadata is not None)
 
-        if (partition_order > 0):
-            total_samples = ((block_size / 2 ** partition_order) -
-                             predictor_order)
-            rice.extend(self.read_encoded_rice(total_samples,rice2))
+            #generate SEEKTABLE from encoder offsets and add it to metadata
+            seekpoint_interval = pcmreader.sample_rate * 10
 
-            for i in xrange(1,2 ** partition_order):
-                total_samples = (block_size / 2 ** partition_order)
+            metadata.add_block(
+                flac.seektable(
+                    [(byte_offset,
+                      pcm_frames) for byte_offset, pcm_frames in offsets],
+                    seekpoint_interval))
 
-                rice.extend(self.read_encoded_rice(total_samples,rice2))
+            #if channels or bps is too high,
+            #automatically generate and add channel mask
+            if ((((pcmreader.channels > 2) or
+                  (pcmreader.bits_per_sample > 16)) and
+                 (channel_mask != 0))):
+                vorbis = metadata.get_block(Flac_VORBISCOMMENT.BLOCK_ID)
+                vorbis[u"WAVEFORMATEXTENSIBLE_CHANNEL_MASK"] = [
+                    u"0x%.4X" % (channel_mask)]
+
+            flac.update_metadata(metadata)
+
+            return flac
+        except (IOError, ValueError), err:
+            cls.__unlink__(filename)
+            raise EncodingError(str(err))
+        except Exception, err:
+            cls.__unlink__(filename)
+            raise err
+
+    def seektable(self, offsets=None, seekpoint_interval=None):
+        """returns a new Flac_SEEKTABLE object
+        created from parsing the FLAC file itself"""
+
+        from bisect import bisect_right
+
+        if (offsets is None):
+            metadata_length = (self.__stream_offset__ +
+                               4 + self.metadata_length())
+            offsets = [(byte_offset - metadata_length,
+                        pcm_frames) for byte_offset, pcm_frames in
+                       self.to_pcm().offsets()]
+
+        if (seekpoint_interval is None):
+            seekpoint_interval = self.sample_rate() * 10
+
+        total_samples = 0
+        all_frames = {}
+        sample_offsets = []
+        for (byte_offset, pcm_frames) in offsets:
+            all_frames[total_samples] = (byte_offset, pcm_frames)
+            sample_offsets.append(total_samples)
+            total_samples += pcm_frames
+
+        seekpoints = []
+        for pcm_frame in xrange(0,
+                                self.total_frames(),
+                                seekpoint_interval):
+            flac_frame = bisect_right(sample_offsets, pcm_frame) - 1
+            seekpoints.append((sample_offsets[flac_frame],
+                               all_frames[sample_offsets[flac_frame]][0],
+                               all_frames[sample_offsets[flac_frame]][1]))
+
+        return Flac_SEEKTABLE(seekpoints)
+
+    def has_foreign_wave_chunks(self):
+        """returns True if the audio file contains non-audio RIFF chunks
+
+        during transcoding, if the source audio file has foreign RIFF chunks
+        and the target audio format supports foreign RIFF chunks,
+        conversion should be routed through .wav conversion
+        to avoid losing those chunks"""
+
+        try:
+            metadata = self.get_metadata()
+            if (metadata is not None):
+                return 'riff' in [
+                    block.application_id for block in
+                    metadata.get_blocks(Flac_APPLICATION.BLOCK_ID)]
+            else:
+                return False
+        except IOError:
+            return False
+
+    def wave_header_footer(self):
+        """returns (header, footer) tuple of strings
+        containing all data before and after the PCM stream
+
+        may raise ValueError if there's a problem with
+        the header or footer data
+        may raise IOError if there's a problem reading
+        header or footer data from the file
+        """
+
+        from .wav import pad_data
+
+        header = []
+        if (pad_data(self.total_frames(),
+                     self.channels(),
+                     self.bits_per_sample())):
+            footer = [chr(0)]
         else:
-            rice.extend(self.read_encoded_rice(block_size - predictor_order,
-                                               rice2))
+            footer = []
+        current_block = header
 
-        return rice
+        metadata = self.get_metadata()
+        if (metadata is None):
+            raise ValueError("no foreign RIFF chunks")
 
+        #convert individual chunks into combined header and footer strings
+        for block in metadata.get_blocks(Flac_APPLICATION.BLOCK_ID):
+            if (block.application_id == "riff"):
+                chunk_id = block.data[0:4]
+                #combine APPLICATION metadata blocks up to "data" as header
+                if (chunk_id != "data"):
+                    current_block.append(block.data)
+                else:
+                    #combine APPLICATION metadata blocks past "data" as footer
+                    current_block.append(block.data)
+                    current_block = footer
 
-    def read_encoded_rice(self, total_samples, rice2=False):
-        bin_to_int = Con.lib.binary.bin_to_int
-
-        samples = array.array('i')
-
-        if (not rice2):
-            rice_parameter = Con.Bits('rice_parameter',4).parse_stream(
-                self.bitstream)
+        #return tuple of header and footer
+        if ((len(header) != 0) or (len(footer) != 0)):
+            return ("".join(header), "".join(footer))
         else:
-            rice_parameter = Con.Bits('rice_parameter',5).parse_stream(
-                self.bitstream)
+            raise ValueError("no foreign RIFF chunks")
 
-        if (rice_parameter != 0xF):
-            #a Rice encoded residual
-            for x in xrange(total_samples):
+    @classmethod
+    def from_wave(cls, filename, header, pcmreader, footer, compression=None):
+        """encodes a new file from wave data
 
-                #count the number of 0 bits before the next 1 bit
-                #(unary encoding)
-                #to find our most significant bits
-                msb = 0
-                s = self.bitstream.read(1)
-                while (s != '\x01'):
-                    msb += 1
-                    s = self.bitstream.read(1)
+        takes a filename string, header string,
+        PCMReader object, footer string
+        and optional compression level string
+        encodes a new audio file from pcmreader's data
+        at the given filename with the specified compression level
+        and returns a new WaveAudio object
 
-                #grab the proper number of least significant bits
-                lsb = bin_to_int(self.bitstream.read(rice_parameter))
+        may raise EncodingError if some problem occurs when
+        encoding the input file"""
 
-                #combine msb and lsb to get the Rice-encoded value
-                value = (msb << rice_parameter) | lsb
-                if ((value & 0x1) == 0x1): #negative
-                    samples.append(-(value >> 1) - 1)
-                else:                      #positive
-                    samples.append(value >> 1)
+        from .bitstream import BitstreamReader
+        from .bitstream import BitstreamRecorder
+        from .bitstream import format_byte_size
+        import cStringIO
+        from .wav import (pad_data, WaveAudio)
+        from . import (EncodingError, CounterPCMReader)
+
+        #split header and footer into distinct chunks
+        header_len = len(header)
+        footer_len = len(footer)
+        fmt_found = False
+        blocks = []
+        try:
+            #read everything from start of header to "data<size>"
+            #chunk header
+            r = BitstreamReader(cStringIO.StringIO(header), 1)
+            (riff, remaining_size, wave) = r.parse("4b 32u 4b")
+            if (riff != "RIFF"):
+                from .text import ERR_WAV_NOT_WAVE
+                raise EncodingError(ERR_WAV_NOT_WAVE)
+            elif (wave != "WAVE"):
+                from .text import ERR_WAV_INVALID_WAVE
+                raise EncodingError(ERR_WAV_INVALID_WAVE)
+            else:
+                block_data = BitstreamRecorder(1)
+                block_data.build("4b 32u 4b", (riff, remaining_size, wave))
+                blocks.append(Flac_APPLICATION("riff", block_data.data()))
+                total_size = remaining_size + 8
+                header_len -= format_byte_size("4b 32u 4b")
+
+            while (header_len):
+                block_data = BitstreamRecorder(1)
+                (chunk_id, chunk_size) = r.parse("4b 32u")
+                #ensure chunk ID is valid
+                if (not frozenset(chunk_id).issubset(
+                        WaveAudio.PRINTABLE_ASCII)):
+                    from .text import ERR_WAV_INVALID_CHUNK
+                    raise EncodingError(ERR_WAV_INVALID_CHUNK)
+                else:
+                    header_len -= format_byte_size("4b 32u")
+                    block_data.build("4b 32u", (chunk_id, chunk_size))
+
+                if (chunk_id == "data"):
+                    #transfer only "data" chunk header to APPLICATION block
+                    if (header_len != 0):
+                        from .text import ERR_WAV_HEADER_EXTRA_DATA
+                        raise EncodingError(ERR_WAV_HEADER_EXTRA_DATA %
+                                            (header_len))
+                    elif (not fmt_found):
+                        from .text import ERR_WAV_NO_FMT_CHUNK
+                        raise EncodingError(ERR_WAV_NO_FMT_CHUNK)
+                    else:
+                        blocks.append(
+                            Flac_APPLICATION("riff", block_data.data()))
+                        data_chunk_size = chunk_size
+                        break
+                elif (chunk_id == "fmt "):
+                    if (not fmt_found):
+                        fmt_found = True
+                        if (chunk_size % 2):
+                            #transfer padded chunk to APPLICATION block
+                            block_data.write_bytes(
+                                r.read_bytes(chunk_size + 1))
+                            header_len -= (chunk_size + 1)
+                        else:
+                            #transfer un-padded chunk to APPLICATION block
+                            block_data.write_bytes(
+                                r.read_bytes(chunk_size))
+                            header_len -= chunk_size
+
+                        blocks.append(
+                            Flac_APPLICATION("riff", block_data.data()))
+                    else:
+                        from .text import ERR_WAV_MULTIPLE_FMT
+                        raise EncodingError(ERR_WAV_MULTIPLE_FMT)
+                else:
+                    if (chunk_size % 2):
+                        #transfer padded chunk to APPLICATION block
+                        block_data.write_bytes(r.read_bytes(chunk_size + 1))
+                        header_len -= (chunk_size + 1)
+                    else:
+                        #transfer un-padded chunk to APPLICATION block
+                        block_data.write_bytes(r.read_bytes(chunk_size))
+                        header_len -= chunk_size
+
+                    blocks.append(Flac_APPLICATION("riff", block_data.data()))
+            else:
+                from .text import ERR_WAV_NO_DATA_CHUNK
+                raise EncodingError(ERR_WAV_NO_DATA_CHUNK)
+        except IOError:
+            from .text import ERR_WAV_HEADER_IOERROR
+            raise EncodingError(ERR_WAV_HEADER_IOERROR)
+
+        try:
+            #read everything from start of footer to end of footer
+            r = BitstreamReader(cStringIO.StringIO(footer), 1)
+            #skip initial footer pad byte
+            if (data_chunk_size % 2):
+                r.skip_bytes(1)
+                footer_len -= 1
+
+            while (footer_len):
+                block_data = BitstreamRecorder(1)
+                (chunk_id, chunk_size) = r.parse("4b 32u")
+
+                if (not frozenset(chunk_id).issubset(
+                        WaveAudio.PRINTABLE_ASCII)):
+                    #ensure chunk ID is valid
+                    from .text import ERR_WAV_INVALID_CHUNK
+                    raise EncodingError(ERR_WAV_INVALID_CHUNK)
+                elif (chunk_id == "fmt "):
+                    #multiple "fmt " chunks is an error
+                    from .text import ERR_WAV_MULTIPLE_FMT
+                    raise EncodingError(ERR_WAV_MULTIPLE_FMT)
+                elif (chunk_id == "data"):
+                    #multiple "data" chunks is an error
+                    from .text import ERR_WAV_MULTIPLE_DATA
+                    raise EncodingError(ERR_WAV_MULTIPLE_DATA)
+                else:
+                    footer_len -= format_byte_size("4b 32u")
+                    block_data.build("4b 32u", (chunk_id, chunk_size))
+
+                    if (chunk_size % 2):
+                        #transfer padded chunk to APPLICATION block
+                        block_data.write_bytes(r.read_bytes(chunk_size + 1))
+                        footer_len -= (chunk_size + 1)
+                    else:
+                        #transfer un-padded chunk to APPLICATION block
+                        block_data.write_bytes(r.read_bytes(chunk_size))
+                        footer_len -= chunk_size
+
+                    blocks.append(Flac_APPLICATION("riff", block_data.data()))
+        except IOError:
+            from .text import ERR_WAV_FOOTER_IOERROR
+            raise EncodingError(ERR_WAV_FOOTER_IOERROR)
+
+        counter = CounterPCMReader(pcmreader)
+
+        #perform standard FLAC encode from PCMReader
+        flac = cls.from_pcm(filename, counter, compression)
+
+        data_bytes_written = counter.bytes_written()
+
+        #ensure processed PCM data equals size of "data" chunk
+        if (data_bytes_written != data_chunk_size):
+            cls.__unlink__(filename)
+            from .text import ERR_WAV_TRUNCATED_DATA_CHUNK
+            raise EncodingError(ERR_WAV_TRUNCATED_DATA_CHUNK)
+
+        #ensure total size of header + PCM + footer matches wav's header
+        if ((len(header) + data_bytes_written + len(footer)) != total_size):
+            cls.__unlink__(filename)
+            from .text import ERR_WAV_INVALID_SIZE
+            raise EncodingError(ERR_WAV_INVALID_SIZE)
+
+        #add chunks as APPLICATION metadata blocks
+        metadata = flac.get_metadata()
+        if (metadata is not None):
+            for block in blocks:
+                metadata.add_block(block)
+            flac.update_metadata(metadata)
+
+        #return encoded FLAC file
+        return flac
+
+    def has_foreign_aiff_chunks(self):
+        """returns True if the audio file contains non-audio AIFF chunks"""
+
+        try:
+            metadata = self.get_metadata()
+            if (metadata is not None):
+                return 'aiff' in [
+                    block.application_id for block in
+                    metadata.get_blocks(Flac_APPLICATION.BLOCK_ID)]
+            else:
+                return False
+        except IOError:
+            return False
+
+    def aiff_header_footer(self):
+        """returns (header, footer) tuple of strings
+        containing all data before and after the PCM stream
+
+        if self.has_foreign_aiff_chunks() is False,
+        may raise ValueError if the file has no header and footer
+        for any reason"""
+
+        from .aiff import pad_data
+
+        header = []
+        if (pad_data(self.total_frames(),
+                     self.channels(),
+                     self.bits_per_sample())):
+            footer = [chr(0)]
         else:
-            #unencoded residual
+            footer = []
+        current_block = header
 
-            bits_per_sample = Con.Bits('escape_code',5).parse_stream(
-                self.bitstream)
+        metadata = self.get_metadata()
+        if (metadata is None):
+            raise ValueError("no foreign AIFF chunks")
 
-            sample = Con.Bits("sample",bits_per_sample,signed=True)
+        #convert individual chunks into combined header and footer strings
+        for block in metadata.get_blocks(Flac_APPLICATION.BLOCK_ID):
+            if (block.application_id == "aiff"):
+                chunk_id = block.data[0:4]
+                #combine APPLICATION metadata blocks up to "SSND" as header
+                if (chunk_id != "SSND"):
+                    current_block.append(block.data)
+                else:
+                    #combine APPLICATION metadata blocks past "SSND" as footer
+                    current_block.append(block.data)
+                    current_block = footer
 
-            for x in xrange(total_samples):
-                samples.append(sample.parse_stream(self.bitstream))
+        #return tuple of header and footer
+        if ((len(header) != 0) or (len(footer) != 0)):
+            return ("".join(header), "".join(footer))
+        else:
+            raise ValueError("no foreign AIFF chunks")
 
-        return samples
+    @classmethod
+    def from_aiff(cls, filename, header, pcmreader, footer, compression=None):
+        """encodes a new file from AIFF data
+
+        takes a filename string, header string,
+        PCMReader object, footer string
+        and optional compression level string
+        encodes a new audio file from pcmreader's data
+        at the given filename with the specified compression level
+        and returns a new AiffAudio object
+
+        header + pcm data + footer should always result
+        in the original AIFF file being restored
+        without need for any padding bytes
+
+        may raise EncodingError if some problem occurs when
+        encoding the input file"""
+
+        from .bitstream import BitstreamReader
+        from .bitstream import BitstreamRecorder
+        from .bitstream import format_byte_size
+        import cStringIO
+        from .aiff import (pad_data, AiffAudio)
+        from . import (EncodingError, CounterPCMReader)
+
+        #split header and footer into distinct chunks
+        header_len = len(header)
+        footer_len = len(footer)
+        comm_found = False
+        blocks = []
+        try:
+            #read everything from start of header to "SSND<size>"
+            #chunk header
+            r = BitstreamReader(cStringIO.StringIO(header), 0)
+            (form, remaining_size, aiff) = r.parse("4b 32u 4b")
+            if (form != "FORM"):
+                from .text import ERR_AIFF_NOT_AIFF
+                raise EncodingError(ERR_AIFF_NOT_AIFF)
+            elif (aiff != "AIFF"):
+                from .text import ERR_AIFF_INVALID_AIFF
+                raise EncodingError(ERR_AIFF_INVALID_AIFF)
+            else:
+                block_data = BitstreamRecorder(0)
+                block_data.build("4b 32u 4b", (form, remaining_size, aiff))
+                blocks.append(Flac_APPLICATION("aiff", block_data.data()))
+                total_size = remaining_size + 8
+                header_len -= format_byte_size("4b 32u 4b")
+
+            while (header_len):
+                block_data = BitstreamRecorder(0)
+                (chunk_id, chunk_size) = r.parse("4b 32u")
+                #ensure chunk ID is valid
+                if (not frozenset(chunk_id).issubset(
+                        AiffAudio.PRINTABLE_ASCII)):
+                    from .text import ERR_AIFF_INVALID_CHUNK
+                    raise EncodingError(ERR_AIFF_INVALID_CHUNK)
+                else:
+                    header_len -= format_byte_size("4b 32u")
+                    block_data.build("4b 32u", (chunk_id, chunk_size))
+
+                if (chunk_id == "SSND"):
+                    #transfer only "SSND" chunk header to APPLICATION block
+                    #(including 8 bytes after ID/size header)
+                    if (header_len > 8):
+                        from .text import ERR_AIFF_HEADER_EXTRA_SSND
+                        raise EncodingError(ERR_AIFF_HEADER_EXTRA_SSND)
+                    elif (header_len < 8):
+                        from .text import ERR_AIFF_HEADER_MISSING_SSND
+                        raise EncodingError(ERR_AIFF_HEADER_MISSING_SSND)
+                    elif (not comm_found):
+                        from .text import ERR_AIFF_NO_COMM_CHUNK
+                        raise EncodingError(ERR_AIFF_NO_COMM_CHUNK)
+                    else:
+                        block_data.write_bytes(r.read_bytes(8))
+                        blocks.append(
+                            Flac_APPLICATION("aiff", block_data.data()))
+                        ssnd_chunk_size = (chunk_size - 8)
+                        break
+                elif (chunk_id == "COMM"):
+                    if (not comm_found):
+                        comm_found = True
+                        if (chunk_size % 2):
+                            #transfer padded chunk to APPLICATION block
+                            block_data.write_bytes(
+                                r.read_bytes(chunk_size + 1))
+                            header_len -= (chunk_size + 1)
+                        else:
+                            #transfer un-padded chunk to APPLICATION block
+                            block_data.write_bytes(
+                                r.read_bytes(chunk_size))
+                            header_len -= chunk_size
+                        blocks.append(
+                            Flac_APPLICATION("aiff", block_data.data()))
+                    else:
+                        from .text import ERR_AIFF_MULTIPLE_COMM_CHUNKS
+                        raise EncodingError(ERR_AIFF_MULTIPLE_COMM_CHUNKS)
+                else:
+                    if (chunk_size % 2):
+                        #transfer padded chunk to APPLICATION block
+                        block_data.write_bytes(r.read_bytes(chunk_size + 1))
+                        header_len -= (chunk_size + 1)
+                    else:
+                        #transfer un-padded chunk to APPLICATION block
+                        block_data.write_bytes(r.read_bytes(chunk_size))
+                        header_len -= chunk_size
+
+                    blocks.append(Flac_APPLICATION("aiff", block_data.data()))
+            else:
+                from .text import ERR_AIFF_NO_SSND_CHUNK
+                raise EncodingError(ERR_AIFF_NO_SSND_CHUNK)
+        except IOError:
+            from .text import ERR_AIFF_HEADER_IOERROR
+            raise EncodingError(ERR_AIFF_HEADER_IOERROR)
+
+        try:
+            #read everything from start of footer to end of footer
+            r = BitstreamReader(cStringIO.StringIO(footer), 0)
+            #skip initial footer pad byte
+            if (ssnd_chunk_size % 2):
+                r.skip_bytes(1)
+                footer_len -= 1
+
+            while (footer_len):
+                block_data = BitstreamRecorder(0)
+                (chunk_id, chunk_size) = r.parse("4b 32u")
+
+                if (not frozenset(chunk_id).issubset(
+                        AiffAudio.PRINTABLE_ASCII)):
+                    #ensure chunk ID is valid
+                    from .text import ERR_AIFF_INVALID_CHUNK
+                    raise EncodingError(ERR_AIFF_INVALID_CHUNK)
+                elif (chunk_id == "COMM"):
+                    #multiple "COMM" chunks is an error
+                    from .text import ERR_AIFF_MULTIPLE_COMM_CHUNKS
+                    raise EncodingError(ERR_AIFF_MULTIPLE_COMM_CHUNKS)
+                elif (chunk_id == "SSND"):
+                    #multiple "SSND" chunks is an error
+                    from .text import ERR_AIFF_MULTIPLE_SSND_CHUNKS
+                    raise EncodingError(ERR_AIFF_MULTIPLE_SSND_CHUNKS)
+                else:
+                    footer_len -= format_byte_size("4b 32u")
+                    block_data.build("4b 32u", (chunk_id, chunk_size))
+
+                    if (chunk_size % 2):
+                        #transfer padded chunk to APPLICATION block
+                        block_data.write_bytes(r.read_bytes(chunk_size + 1))
+                        footer_len -= (chunk_size + 1)
+                    else:
+                        #transfer un-padded chunk to APPLICATION block
+                        block_data.write_bytes(r.read_bytes(chunk_size))
+                        footer_len -= chunk_size
+
+                    blocks.append(Flac_APPLICATION("aiff", block_data.data()))
+        except IOError:
+            from .text import ERR_AIFF_FOOTER_IOERROR
+            raise EncodingError(ERR_AIFF_FOOTER_IOERROR)
+
+        counter = CounterPCMReader(pcmreader)
+
+        #perform standard FLAC encode from PCMReader
+        flac = cls.from_pcm(filename, counter, compression)
+
+        ssnd_bytes_written = counter.bytes_written()
+
+        #ensure processed PCM data equals size of "SSND" chunk
+        if (ssnd_bytes_written != ssnd_chunk_size):
+            cls.__unlink__(filename)
+            from .text import ERR_AIFF_TRUNCATED_SSND_CHUNK
+            raise EncodingError(ERR_AIFF_TRUNCATED_SSND_CHUNK)
+
+        #ensure total size of header + PCM + footer matches aiff's header
+        if ((len(header) + ssnd_bytes_written + len(footer)) != total_size):
+            cls.__unlink__(filename)
+            from .text import ERR_AIFF_INVALID_SIZE
+            raise EncodingError(ERR_AIFF_INVALID_SIZE)
+
+        #add chunks as APPLICATION metadata blocks
+        metadata = flac.get_metadata()
+        if (metadata is not None):
+            for block in blocks:
+                metadata.add_block(block)
+            flac.update_metadata(metadata)
+
+        #return encoded FLAC file
+        return flac
+
+    def convert(self, target_path, target_class, compression=None,
+                progress=None):
+        """encodes a new AudioFile from existing AudioFile
+
+        take a filename string, target class and optional compression string
+        encodes a new AudioFile in the target class and returns
+        the resulting object
+        may raise EncodingError if some problem occurs during encoding"""
+
+        #If a FLAC has embedded RIFF *and* embedded AIFF chunks,
+        #RIFF takes precedence if the target format supports both.
+        #It's hard to envision a scenario in which that would happen.
+
+        import tempfile
+        from . import WaveAudio
+        from . import AiffAudio
+        from . import to_pcm_progress
+
+        if ((self.has_foreign_wave_chunks() and
+             hasattr(target_class, "from_wave") and
+             callable(target_class.from_wave))):
+            return WaveContainer.convert(self,
+                                         target_path,
+                                         target_class,
+                                         compression,
+                                         progress)
+        elif (self.has_foreign_aiff_chunks() and
+              hasattr(target_class, "from_aiff") and
+              callable(target_class.from_aiff)):
+            return AiffContainer.convert(self,
+                                         target_path,
+                                         target_class,
+                                         compression,
+                                         progress)
+        else:
+            return target_class.from_pcm(target_path,
+                                         to_pcm_progress(self, progress),
+                                         compression)
+
+    def bits_per_sample(self):
+        """returns an integer number of bits-per-sample this track contains"""
+
+        return self.__bitspersample__
+
+    def channels(self):
+        """returns an integer number of channels this track contains"""
+
+        return self.__channels__
+
+    def total_frames(self):
+        """returns the total PCM frames of the track as an integer"""
+
+        return self.__total_frames__
+
+    def sample_rate(self):
+        """returns the rate of the track's audio as an integer number of Hz"""
+
+        return self.__samplerate__
+
+    def __read_streaminfo__(self):
+        valid_header_types = frozenset(range(0, 6 + 1))
+        f = file(self.filename, "rb")
+        try:
+            self.__stream_offset__ = skip_id3v2_comment(f)
+            f.read(4)
+
+            from .bitstream import BitstreamReader
+
+            reader = BitstreamReader(f, 0)
+
+            stop = 0
+
+            while (stop == 0):
+                (stop, header_type, length) = reader.parse("1u 7u 24u")
+                if (header_type not in valid_header_types):
+                    from .text import ERR_FLAC_INVALID_BLOCK
+                    raise InvalidFLAC(ERR_FLAC_INVALID_BLOCK)
+                elif (header_type == 0):
+                    (self.__samplerate__,
+                     self.__channels__,
+                     self.__bitspersample__,
+                     self.__total_frames__,
+                     self.__md5__) = reader.parse("80p 20u 3u 5u 36U 16b")
+                    self.__channels__ += 1
+                    self.__bitspersample__ += 1
+                    break
+                else:
+                    #though the STREAMINFO should always be first,
+                    #we'll be permissive and check them all if necessary
+                    reader.skip_bytes(length)
+        finally:
+            f.close()
+
+    @classmethod
+    def can_add_replay_gain(cls, audiofiles):
+        """given a list of audiofiles,
+        returns True if this class can add ReplayGain to those files
+        returns False if not"""
+
+        for audiofile in audiofiles:
+            if (not isinstance(audiofile, FlacAudio)):
+                return False
+        else:
+            return True
+
+    @classmethod
+    def add_replay_gain(cls, filenames, progress=None):
+        """adds ReplayGain values to a list of filename strings
+
+        all the filenames must be of this AudioFile type
+        raises ValueError if some problem occurs during ReplayGain application
+        """
+
+        from . import open_files
+        from . import calculate_replay_gain
+
+        tracks = [track for track in open_files(filenames) if
+                  isinstance(track, cls)]
+
+        if (len(tracks) > 0):
+            for (track,
+                 track_gain,
+                 track_peak,
+                 album_gain,
+                 album_peak) in calculate_replay_gain(tracks, progress):
+                try:
+                    metadata = track.get_metadata()
+                    if (metadata is None):
+                        return
+                except IOError:
+                    return
+                try:
+                    comment = metadata.get_block(
+                        Flac_VORBISCOMMENT.BLOCK_ID)
+                except IndexError:
+                    from . import VERSION
+
+                    comment = Flac_VORBISCOMMENT(
+                        [], u"Python Audio Tools %s" % (VERSION))
+                    metadata.add_block(comment)
+
+                comment["REPLAYGAIN_TRACK_GAIN"] = [
+                    "%1.2f dB" % (track_gain)]
+                comment["REPLAYGAIN_TRACK_PEAK"] = [
+                    "%1.8f" % (track_peak)]
+                comment["REPLAYGAIN_ALBUM_GAIN"] = [
+                    "%1.2f dB" % (album_gain)]
+                comment["REPLAYGAIN_ALBUM_PEAK"] = ["%1.8f" % (album_peak)]
+                comment["REPLAYGAIN_REFERENCE_LOUDNESS"] = [u"89.0 dB"]
+                track.update_metadata(metadata)
+
+    @classmethod
+    def supports_replay_gain(cls):
+        """returns True if this class supports ReplayGain"""
+
+        return True
+
+    @classmethod
+    def lossless_replay_gain(cls):
+        """returns True"""
+
+        return True
+
+    def replay_gain(self):
+        """returns a ReplayGain object of our ReplayGain values
+
+        returns None if we have no values"""
+
+        from . import ReplayGain
+
+        try:
+            metadata = self.get_metadata()
+            if (metadata is not None):
+                vorbis_metadata = metadata.get_block(
+                    Flac_VORBISCOMMENT.BLOCK_ID)
+            else:
+                return None
+        except (IndexError, IOError):
+            return None
+
+        if (set(['REPLAYGAIN_TRACK_PEAK', 'REPLAYGAIN_TRACK_GAIN',
+                 'REPLAYGAIN_ALBUM_PEAK', 'REPLAYGAIN_ALBUM_GAIN']).issubset(
+                [key.upper() for key in vorbis_metadata.keys()])):
+            # we have ReplayGain data
+            try:
+                return ReplayGain(
+                    vorbis_metadata['REPLAYGAIN_TRACK_GAIN'][0][0:-len(" dB")],
+                    vorbis_metadata['REPLAYGAIN_TRACK_PEAK'][0],
+                    vorbis_metadata['REPLAYGAIN_ALBUM_GAIN'][0][0:-len(" dB")],
+                    vorbis_metadata['REPLAYGAIN_ALBUM_PEAK'][0])
+            except ValueError:
+                return None
+        else:
+            return None
+
+    def __eq__(self, audiofile):
+        if (isinstance(audiofile, FlacAudio)):
+            return self.__md5__ == audiofile.__md5__
+        elif (isinstance(audiofile, AudioFile)):
+            from . import FRAMELIST_SIZE
+
+            try:
+                from hashlib import md5
+            except ImportError:
+                from md5 import new as md5
+
+            p = audiofile.to_pcm()
+            m = md5()
+            s = p.read(FRAMELIST_SIZE)
+            while (len(s) > 0):
+                m.update(s.to_bytes(False, True))
+                s = p.read(FRAMELIST_SIZE)
+            p.close()
+            return m.digest() == self.__md5__
+        else:
+            return False
+
+    def clean(self, fixes_performed, output_filename=None):
+        """cleans the file of known data and metadata problems
+
+        fixes_performed is a list-like object which is appended
+        with Unicode strings of fixed problems
+
+        output_filename is an optional filename of the fixed file
+        if present, a new AudioFile is returned
+        otherwise, only a dry-run is performed and no new file is written
+
+        raises IOError if unable to write the file or its metadata
+        """
+
+        import os.path
+
+        def seektable_valid(seektable, metadata_offset, input_file):
+            from .bitstream import BitstreamReader
+            reader = BitstreamReader(input_file, 0)
+
+            for (pcm_frame_offset,
+                 seekpoint_offset,
+                 pcm_frame_count) in seektable.seekpoints:
+                input_file.seek(seekpoint_offset + metadata_offset)
+                try:
+                    (sync_code,
+                     reserved1,
+                     reserved2) = reader.parse(
+                         "14u 1u 1p 4p 4p 4p 3p 1u")
+                    if (((sync_code != 0x3FFE) or
+                         (reserved1 != 0) or
+                         (reserved2 != 0))):
+                        return False
+                except IOError:
+                    return False
+            else:
+                return True
+
+        if (output_filename is None):
+            #dry run only
+
+            input_f = open(self.filename, "rb")
+            try:
+                #remove ID3 tags from before and after FLAC stream
+                stream_offset = skip_id3v2_comment(input_f)
+                if (stream_offset > 0):
+                    from .text import CLEAN_FLAC_REMOVE_ID3V2
+                    fixes_performed.append(CLEAN_FLAC_REMOVE_ID3V2)
+                try:
+                    input_f.seek(-128, 2)
+                    if (input_f.read(3) == 'TAG'):
+                        from .text import CLEAN_FLAC_REMOVE_ID3V1
+                        fixes_performed.append(CLEAN_FLAC_REMOVE_ID3V1)
+                except IOError:
+                    #file isn't 128 bytes long
+                    pass
+
+                #fix empty MD5SUM
+                if (self.__md5__ == chr(0) * 16):
+                    from .text import CLEAN_FLAC_POPULATE_MD5
+                    fixes_performed.append(CLEAN_FLAC_POPULATE_MD5)
+
+                metadata = self.get_metadata()
+                if (metadata is None):
+                    return
+
+                #fix missing WAVEFORMATEXTENSIBLE_CHANNEL_MASK
+                if ((self.channels() > 2) or (self.bits_per_sample() > 16)):
+                    from .text import CLEAN_FLAC_ADD_CHANNELMASK
+                    try:
+                        if (u"WAVEFORMATEXTENSIBLE_CHANNEL_MASK" not in
+                            metadata.get_block(
+                                Flac_VORBISCOMMENT.BLOCK_ID).keys()):
+                            fixes_performed.append(CLEAN_FLAC_ADD_CHANNELMASK)
+                    except IndexError:
+                        fixes_performed.append(CLEAN_FLAC_ADD_CHANNELMASK)
+
+                #fix an invalid SEEKTABLE, if present
+                try:
+                    if (not seektable_valid(
+                            metadata.get_block(Flac_SEEKTABLE.BLOCK_ID),
+                            stream_offset + 4 + self.metadata_length(),
+                            input_f)):
+                        from .text import CLEAN_FLAC_FIX_SEEKTABLE
+                        fixes_performed.append(CLEAN_FLAC_FIX_SEEKTABLE)
+                except IndexError:
+                    pass
+
+                #fix any remaining metadata problems
+                metadata.clean(fixes_performed)
+
+            finally:
+                input_f.close()
+        else:
+            #perform complete fix
+
+            input_f = open(self.filename, "rb")
+            try:
+                #remove ID3 tags from before and after FLAC stream
+                stream_size = os.path.getsize(self.filename)
+
+                stream_offset = skip_id3v2_comment(input_f)
+                if (stream_offset > 0):
+                    from .text import CLEAN_FLAC_REMOVE_ID3V2
+                    fixes_performed.append(CLEAN_FLAC_REMOVE_ID3V2)
+                    stream_size -= stream_offset
+
+                try:
+                    input_f.seek(-128, 2)
+                    if (input_f.read(3) == 'TAG'):
+                        from .text import CLEAN_FLAC_REMOVE_ID3V1
+                        fixes_performed.append(CLEAN_FLAC_REMOVE_ID3V1)
+                        stream_size -= 128
+                except IOError:
+                    #file isn't 128 bytes long
+                    pass
+
+                output_f = open(output_filename, "wb")
+                try:
+                    input_f.seek(stream_offset, 0)
+                    while (stream_size > 0):
+                        s = input_f.read(4096)
+                        if (len(s) > stream_size):
+                            s = s[0:stream_size]
+                        output_f.write(s)
+                        stream_size -= len(s)
+                finally:
+                    output_f.close()
+
+                output_track = self.__class__(output_filename)
+
+                metadata = self.get_metadata()
+                if (metadata is not None):
+                    #fix empty MD5SUM
+                    if (self.__md5__ == chr(0) * 16):
+                        from hashlib import md5
+                        from . import transfer_framelist_data
+
+                        md5sum = md5()
+                        transfer_framelist_data(
+                            self.to_pcm(),
+                            md5sum.update,
+                            signed=True,
+                            big_endian=False)
+                        metadata.get_block(
+                            Flac_STREAMINFO.BLOCK_ID).md5sum = md5sum.digest()
+                        from .text import CLEAN_FLAC_POPULATE_MD5
+                        fixes_performed.append(CLEAN_FLAC_POPULATE_MD5)
+
+                    #fix missing WAVEFORMATEXTENSIBLE_CHANNEL_MASK
+                    if (((self.channels() > 2) or
+                         (self.bits_per_sample() > 16))):
+                        try:
+                            vorbis_comment = metadata.get_block(
+                                Flac_VORBISCOMMENT.BLOCK_ID)
+                        except IndexError:
+                            from . import VERSION
+
+                            vorbis_comment = Flac_VORBISCOMMENT(
+                                [], u"Python Audio Tools %s" % (VERSION))
+
+                        if ((u"WAVEFORMATEXTENSIBLE_CHANNEL_MASK" not in
+                             vorbis_comment.keys())):
+                            from .text import CLEAN_FLAC_ADD_CHANNELMASK
+                            fixes_performed.append(CLEAN_FLAC_ADD_CHANNELMASK)
+                            vorbis_comment[
+                                u"WAVEFORMATEXTENSIBLE_CHANNEL_MASK"] = \
+                                [u"0x%.4X" % (self.channel_mask())]
+
+                            metadata.replace_blocks(
+                                Flac_VORBISCOMMENT.BLOCK_ID,
+                                [vorbis_comment])
+
+                    #fix an invalid SEEKTABLE, if present
+                    try:
+                        if (not seektable_valid(
+                                metadata.get_block(Flac_SEEKTABLE.BLOCK_ID),
+                                stream_offset + 4 + self.metadata_length(),
+                                input_f)):
+                            from .text import CLEAN_FLAC_FIX_SEEKTABLE
+                            fixes_performed.append(CLEAN_FLAC_FIX_SEEKTABLE)
+
+                            metadata.replace_blocks(Flac_SEEKTABLE.BLOCK_ID,
+                                                    [self.seektable()])
+                    except IndexError:
+                        pass
+
+                    #fix remaining metadata problems
+                    #which automatically shifts STREAMINFO to the right place
+                    #(the message indicating the fix has already been output)
+                    output_track.update_metadata(
+                        metadata.clean(fixes_performed))
+
+                return output_track
+            finally:
+                input_f.close()
 
 
-###############################
-#Checksum calculation functions
-###############################
+class FLAC_Data_Chunk:
+    def __init__(self, total_frames, pcmreader):
+        self.id = "data"
+        self.__total_frames__ = total_frames
+        self.__pcmreader__ = pcmreader
 
-CRC8TABLE = (0x00, 0x07, 0x0E, 0x09, 0x1C, 0x1B, 0x12, 0x15,
-             0x38, 0x3F, 0x36, 0x31, 0x24, 0x23, 0x2A, 0x2D,
-             0x70, 0x77, 0x7E, 0x79, 0x6C, 0x6B, 0x62, 0x65,
-             0x48, 0x4F, 0x46, 0x41, 0x54, 0x53, 0x5A, 0x5D,
-             0xE0, 0xE7, 0xEE, 0xE9, 0xFC, 0xFB, 0xF2, 0xF5,
-             0xD8, 0xDF, 0xD6, 0xD1, 0xC4, 0xC3, 0xCA, 0xCD,
-             0x90, 0x97, 0x9E, 0x99, 0x8C, 0x8B, 0x82, 0x85,
-             0xA8, 0xAF, 0xA6, 0xA1, 0xB4, 0xB3, 0xBA, 0xBD,
-             0xC7, 0xC0, 0xC9, 0xCE, 0xDB, 0xDC, 0xD5, 0xD2,
-             0xFF, 0xF8, 0xF1, 0xF6, 0xE3, 0xE4, 0xED, 0xEA,
-             0xB7, 0xB0, 0xB9, 0xBE, 0xAB, 0xAC, 0xA5, 0xA2,
-             0x8F, 0x88, 0x81, 0x86, 0x93, 0x94, 0x9D, 0x9A,
-             0x27, 0x20, 0x29, 0x2E, 0x3B, 0x3C, 0x35, 0x32,
-             0x1F, 0x18, 0x11, 0x16, 0x03, 0x04, 0x0D, 0x0A,
-             0x57, 0x50, 0x59, 0x5E, 0x4B, 0x4C, 0x45, 0x42,
-             0x6F, 0x68, 0x61, 0x66, 0x73, 0x74, 0x7D, 0x7A,
-             0x89, 0x8E, 0x87, 0x80, 0x95, 0x92, 0x9B, 0x9C,
-             0xB1, 0xB6, 0xBF, 0xB8, 0xAD, 0xAA, 0xA3, 0xA4,
-             0xF9, 0xFE, 0xF7, 0xF0, 0xE5, 0xE2, 0xEB, 0xEC,
-             0xC1, 0xC6, 0xCF, 0xC8, 0xDD, 0xDA, 0xD3, 0xD4,
-             0x69, 0x6E, 0x67, 0x60, 0x75, 0x72, 0x7B, 0x7C,
-             0x51, 0x56, 0x5F, 0x58, 0x4D, 0x4A, 0x43, 0x44,
-             0x19, 0x1E, 0x17, 0x10, 0x05, 0x02, 0x0B, 0x0C,
-             0x21, 0x26, 0x2F, 0x28, 0x3D, 0x3A, 0x33, 0x34,
-             0x4E, 0x49, 0x40, 0x47, 0x52, 0x55, 0x5C, 0x5B,
-             0x76, 0x71, 0x78, 0x7F, 0x6A, 0x6D, 0x64, 0x63,
-             0x3E, 0x39, 0x30, 0x37, 0x22, 0x25, 0x2C, 0x2B,
-             0x06, 0x01, 0x08, 0x0F, 0x1A, 0x1D, 0x14, 0x13,
-             0xAE, 0xA9, 0xA0, 0xA7, 0xB2, 0xB5, 0xBC, 0xBB,
-             0x96, 0x91, 0x98, 0x9F, 0x8A, 0x8D, 0x84, 0x83,
-             0xDE, 0xD9, 0xD0, 0xD7, 0xC2, 0xC5, 0xCC, 0xCB,
-             0xE6, 0xE1, 0xE8, 0xEF, 0xFA, 0xFD, 0xF4, 0xF3)
+    def __repr__(self):
+        return "FLAC_Data_Chunk()"
 
-def crc8(data, start=0):
-    value = start
+    def size(self):
+        """returns size of chunk in bytes
+        not including any spacer byte for odd-sized chunks"""
 
-    for i in map(ord,data):
-        value = CRC8TABLE[value ^ i]
+        return (self.__total_frames__ *
+                self.__pcmreader__.channels *
+                (self.__pcmreader__.bits_per_sample / 8))
 
-    return value
+    def verify(self):
+        "returns True"
 
-CRC16TABLE = (0x0000,0x8005,0x800f,0x000a,0x801b,0x001e,0x0014,0x8011,
-              0x8033,0x0036,0x003c,0x8039,0x0028,0x802d,0x8027,0x0022,
-              0x8063,0x0066,0x006c,0x8069,0x0078,0x807d,0x8077,0x0072,
-              0x0050,0x8055,0x805f,0x005a,0x804b,0x004e,0x0044,0x8041,
-              0x80c3,0x00c6,0x00cc,0x80c9,0x00d8,0x80dd,0x80d7,0x00d2,
-              0x00f0,0x80f5,0x80ff,0x00fa,0x80eb,0x00ee,0x00e4,0x80e1,
-              0x00a0,0x80a5,0x80af,0x00aa,0x80bb,0x00be,0x00b4,0x80b1,
-              0x8093,0x0096,0x009c,0x8099,0x0088,0x808d,0x8087,0x0082,
-              0x8183,0x0186,0x018c,0x8189,0x0198,0x819d,0x8197,0x0192,
-              0x01b0,0x81b5,0x81bf,0x01ba,0x81ab,0x01ae,0x01a4,0x81a1,
-              0x01e0,0x81e5,0x81ef,0x01ea,0x81fb,0x01fe,0x01f4,0x81f1,
-              0x81d3,0x01d6,0x01dc,0x81d9,0x01c8,0x81cd,0x81c7,0x01c2,
-              0x0140,0x8145,0x814f,0x014a,0x815b,0x015e,0x0154,0x8151,
-              0x8173,0x0176,0x017c,0x8179,0x0168,0x816d,0x8167,0x0162,
-              0x8123,0x0126,0x012c,0x8129,0x0138,0x813d,0x8137,0x0132,
-              0x0110,0x8115,0x811f,0x011a,0x810b,0x010e,0x0104,0x8101,
-              0x8303,0x0306,0x030c,0x8309,0x0318,0x831d,0x8317,0x0312,
-              0x0330,0x8335,0x833f,0x033a,0x832b,0x032e,0x0324,0x8321,
-              0x0360,0x8365,0x836f,0x036a,0x837b,0x037e,0x0374,0x8371,
-              0x8353,0x0356,0x035c,0x8359,0x0348,0x834d,0x8347,0x0342,
-              0x03c0,0x83c5,0x83cf,0x03ca,0x83db,0x03de,0x03d4,0x83d1,
-              0x83f3,0x03f6,0x03fc,0x83f9,0x03e8,0x83ed,0x83e7,0x03e2,
-              0x83a3,0x03a6,0x03ac,0x83a9,0x03b8,0x83bd,0x83b7,0x03b2,
-              0x0390,0x8395,0x839f,0x039a,0x838b,0x038e,0x0384,0x8381,
-              0x0280,0x8285,0x828f,0x028a,0x829b,0x029e,0x0294,0x8291,
-              0x82b3,0x02b6,0x02bc,0x82b9,0x02a8,0x82ad,0x82a7,0x02a2,
-              0x82e3,0x02e6,0x02ec,0x82e9,0x02f8,0x82fd,0x82f7,0x02f2,
-              0x02d0,0x82d5,0x82df,0x02da,0x82cb,0x02ce,0x02c4,0x82c1,
-              0x8243,0x0246,0x024c,0x8249,0x0258,0x825d,0x8257,0x0252,
-              0x0270,0x8275,0x827f,0x027a,0x826b,0x026e,0x0264,0x8261,
-              0x0220,0x8225,0x822f,0x022a,0x823b,0x023e,0x0234,0x8231,
-              0x8213,0x0216,0x021c,0x8219,0x0208,0x820d,0x8207,0x0202)
+        return True
 
-def crc16(data, start=0):
-    value = start
+    def write(self, f):
+        """writes the entire chunk to the given output file object
+        returns size of entire chunk (including header and spacer)
+        in bytes"""
 
-    for i in map(ord,data):
-        value = ((value << 8) ^ CRC16TABLE[(value >> 8) ^ i]) & 0xFFFF
+        from struct import pack
+        from . import FRAMELIST_SIZE
 
-    return value
+        f.write(self.id)
+        f.write(pack("<I", self.size()))
+        bytes_written = 8
+        signed = (self.__pcmreader__.bits_per_sample > 8)
+        s = self.__pcmreader__.read(FRAMELIST_SIZE)
+        while (len(s) > 0):
+            b = s.to_bytes(False, signed)
+            f.write(b)
+            bytes_written += len(b)
+            s = self.__pcmreader__.read(FRAMELIST_SIZE)
 
-#BufferedStream stores the data that passes through read()
-#so that checksums can be calculated from it.
-#Be sure to reset the buffer as needed.
-class BufferedStream:
-    def __init__(self, stream):
-        self.stream = stream
-        self.buffer = cStringIO.StringIO()
+        if (bytes_written % 2):
+            f.write(chr(0))
+            bytes_written += 1
 
-    def read(self, count):
-        s = self.stream.read(count)
-        self.buffer.write(s)
-        return s
-
-    def seek(self, offset, whence=0):
-        self.stream.seek(offset,whence)
-
-    def tell(self):
-        return self.stream.tell()
-
-    def close(self):
-        self.stream.close()
-
-    def reset_buffer(self):
-        self.buffer.close()
-        self.buffer = cStringIO.StringIO()
-
-    def getvalue(self):
-        return self.buffer.getvalue()
+        return bytes_written
 
 
-class FlacPCMReader(audiotools.PCMReader):
-    #flac_file should be a file-like stream of FLAC data
-    def __init__(self, flac_file):
-        self.flacreader = FlacReader(flac_file)
-        self.sample_rate = self.flacreader.streaminfo.samplerate
-        self.channels = self.flacreader.streaminfo.channels + 1
-        self.bits_per_sample = self.flacreader.streaminfo.bits_per_sample + 1
-        self.process = None
+class FLAC_SSND_Chunk(FLAC_Data_Chunk):
+    def __init__(self, total_frames, pcmreader):
+        self.id = "SSND"
+        self.__total_frames__ = total_frames
+        self.__pcmreader__ = pcmreader
 
-        self.buffer = []
+    def __repr__(self):
+        return "FLAC_SSND_Chunk()"
 
-    #this won't return even close to the expected number of bytes
-    #(though that won't really break anything)
-    def read(self, bytes):
-        return self.flacreader.read_frame()
+    def size(self):
+        """returns size of chunk in bytes
+        not including any spacer byte for odd-sized chunks"""
 
-    def close(self):
-        self.flacreader.close()
+        return 8 + (self.__total_frames__ *
+                    self.__pcmreader__.channels *
+                    (self.__pcmreader__.bits_per_sample / 8))
 
+    def write(self, f):
+        """writes the entire chunk to the given output file object
+        returns size of entire chunk (including header and spacer)
+        in bytes"""
+
+        from struct import pack
+        from . import FRAMELIST_SIZE
+
+        f.write(self.id)
+        f.write(pack(">I", self.size()))
+        bytes_written = 8
+        f.write(pack(">II", 0, 0))
+        bytes_written += 8
+        s = self.__pcmreader__.read(FRAMELIST_SIZE)
+        while (len(s) > 0):
+            b = s.to_bytes(True, True)
+            f.write(b)
+            bytes_written += len(b)
+            s = self.__pcmreader__.read(FRAMELIST_SIZE)
+
+        if (bytes_written % 2):
+            f.write(chr(0))
+            bytes_written += 1
+
+        return bytes_written
+
+
+#######################
+#Ogg FLAC
+#######################
+
+
+class OggFlacMetaData(FlacMetaData):
+    @classmethod
+    def converted(cls, metadata):
+        """takes a MetaData object and returns an OggFlacMetaData object"""
+
+        if (metadata is None):
+            return None
+        elif (isinstance(metadata, FlacMetaData)):
+            return cls([block.copy() for block in metadata.block_list])
+        else:
+            return cls([Flac_VORBISCOMMENT.converted(metadata)] +
+                       [Flac_PICTURE.converted(image)
+                        for image in metadata.images()])
+
+    def __repr__(self):
+        return ("OggFlacMetaData(%s)" % (repr(self.block_list)))
+
+    @classmethod
+    def parse(cls, reader):
+        """returns an OggFlacMetaData object from the given BitstreamReader
+
+        raises IOError or ValueError if an error occurs reading MetaData"""
+
+        from .ogg import read_ogg_packets
+
+        streaminfo = None
+        applications = []
+        seektable = None
+        vorbis_comment = None
+        cuesheet = None
+        pictures = []
+
+        packets = read_ogg_packets(reader)
+
+        streaminfo_packet = packets.next()
+        streaminfo_packet.set_endianness(0)
+
+        (packet_byte,
+         ogg_signature,
+         major_version,
+         minor_version,
+         header_packets,
+         flac_signature,
+         block_type,
+         block_length,
+         minimum_block_size,
+         maximum_block_size,
+         minimum_frame_size,
+         maximum_frame_size,
+         sample_rate,
+         channels,
+         bits_per_sample,
+         total_samples,
+         md5sum) = streaminfo_packet.parse(
+             "8u 4b 8u 8u 16u 4b 8u 24u 16u 16u 24u 24u 20u 3u 5u 36U 16b")
+
+        block_list = [Flac_STREAMINFO(minimum_block_size=minimum_block_size,
+                                      maximum_block_size=maximum_block_size,
+                                      minimum_frame_size=minimum_frame_size,
+                                      maximum_frame_size=maximum_frame_size,
+                                      sample_rate=sample_rate,
+                                      channels=channels + 1,
+                                      bits_per_sample=bits_per_sample + 1,
+                                      total_samples=total_samples,
+                                      md5sum=md5sum)]
+
+        for (i, packet) in zip(range(header_packets), packets):
+            packet.set_endianness(0)
+            (block_type, length) = packet.parse("1p 7u 24u")
+            if (block_type == 1):    # PADDING
+                block_list.append(Flac_PADDING.parse(packet, length))
+            if (block_type == 2):    # APPLICATION
+                block_list.append(Flac_APPLICATION.parse(packet, length))
+            elif (block_type == 3):  # SEEKTABLE
+                block_list.append(Flac_SEEKTABLE.parse(packet, length / 18))
+            elif (block_type == 4):  # VORBIS_COMMENT
+                block_list.append(Flac_VORBISCOMMENT.parse(packet))
+            elif (block_type == 5):  # CUESHEET
+                block_list.append(Flac_CUESHEET.parse(packet))
+            elif (block_type == 6):  # PICTURE
+                block_list.append(Flac_PICTURE.parse(packet))
+            elif ((block_type >= 7) and (block_type <= 126)):
+                from .text import ERR_FLAC_RESERVED_BLOCK
+                raise ValueError(ERR_FLAC_RESERVED_BLOCK % (block_type))
+            elif (block_type == 127):
+                from .text import ERR_FLAC_INVALID_BLOCK
+                raise ValueError(ERR_FLAC_INVALID_BLOCK)
+
+        return cls(block_list)
+
+    def build(self, oggwriter):
+        """oggwriter is an OggStreamWriter-compatible object"""
+
+        from .bitstream import BitstreamRecorder
+        from .bitstream import format_size
+        from . import iter_first, iter_last
+
+        packet = BitstreamRecorder(0)
+
+        #build extended Ogg FLAC STREAMINFO block
+        #which will always occupy its own page
+        streaminfo = self.get_block(Flac_STREAMINFO.BLOCK_ID)
+
+        #all our non-STREAMINFO blocks that are small enough
+        #to fit in the output stream
+        valid_blocks = [b for b in self.blocks()
+                        if ((b.BLOCK_ID != Flac_STREAMINFO.BLOCK_ID) and
+                            (b.size() < (2 ** 24)))]
+
+        packet.build(
+            "8u 4b 8u 8u 16u 4b 8u 24u 16u 16u 24u 24u 20u 3u 5u 36U 16b",
+            (0x7F,
+             "FLAC",
+             1,
+             0,
+             len(valid_blocks),
+             "fLaC",
+             0,
+             format_size("16u 16u 24u 24u 20u 3u 5u 36U 16b") / 8,
+             streaminfo.minimum_block_size,
+             streaminfo.maximum_block_size,
+             streaminfo.minimum_frame_size,
+             streaminfo.maximum_frame_size,
+             streaminfo.sample_rate,
+             streaminfo.channels - 1,
+             streaminfo.bits_per_sample - 1,
+             streaminfo.total_samples,
+             streaminfo.md5sum))
+        oggwriter.write_page(0, [packet.data()], 0, 1, 0)
+
+        #FIXME - adjust non-STREAMINFO blocks to use fewer pages
+
+        #pack remaining metadata blocks into as few pages as possible, if any
+        if (len(valid_blocks)):
+            for (last_block, block) in iter_last(iter(valid_blocks)):
+                packet.reset()
+                if (not last_block):
+                    packet.build("1u 7u 24u",
+                                 (0, block.BLOCK_ID, block.size()))
+                else:
+                    packet.build("1u 7u 24u",
+                                 (1, block.BLOCK_ID, block.size()))
+                block.build(packet)
+                for (first_page, page_segments) in iter_first(
+                    oggwriter.segments_to_pages(
+                        oggwriter.packet_to_segments(packet.data()))):
+                    oggwriter.write_page(0 if first_page else -1,
+                                         page_segments,
+                                         0 if first_page else 1, 0, 0)
+
+
+class __Counter__:
+    def __init__(self):
+        self.value = 0
+
+    def count_byte(self, i):
+        self.value += 1
+
+    def __int__(self):
+        return self.value
+
+
+class OggFlacAudio(FlacAudio):
+    """a Free Lossless Audio Codec file inside an Ogg container"""
+
+    from .text import (COMP_FLAC_0, COMP_FLAC_8)
+
+    SUFFIX = "oga"
+    NAME = SUFFIX
+    DESCRIPTION = u"Ogg FLAC"
+    DEFAULT_COMPRESSION = "8"
+    COMPRESSION_MODES = tuple(map(str, range(0, 9)))
+    COMPRESSION_DESCRIPTIONS = {"0": COMP_FLAC_0,
+                                "8": COMP_FLAC_8}
+    BINARIES = ("flac",)
+
+    METADATA_CLASS = OggFlacMetaData
+
+    def __init__(self, filename):
+        """filename is a plain string"""
+
+        AudioFile.__init__(self, filename)
+        self.__samplerate__ = 0
+        self.__channels__ = 0
+        self.__bitspersample__ = 0
+        self.__total_frames__ = 0
+
+        try:
+            self.__read_streaminfo__()
+        except IOError, msg:
+            raise InvalidFLAC(str(msg))
+
+    def bits_per_sample(self):
+        """returns an integer number of bits-per-sample this track contains"""
+
+        return self.__bitspersample__
+
+    def channels(self):
+        """returns an integer number of channels this track contains"""
+
+        return self.__channels__
+
+    def total_frames(self):
+        """returns the total PCM frames of the track as an integer"""
+
+        return self.__total_frames__
+
+    def sample_rate(self):
+        """returns the rate of the track's audio as an integer number of Hz"""
+
+        return self.__samplerate__
+
+    def get_metadata(self):
+        """returns a MetaData object, or None
+
+        raise ValueError if some error reading metadata
+        raises IOError if unable to read the file"""
+
+        f = open(self.filename, "rb")
+        try:
+            from .bitstream import BitstreamReader
+
+            try:
+                return OggFlacMetaData.parse(BitstreamReader(f, 1))
+            except ValueError:
+                return None
+        finally:
+            f.close()
+
+    def update_metadata(self, metadata):
+        """takes this track's current MetaData object
+        as returned by get_metadata() and sets this track's metadata
+        with any fields updated in that object
+
+        raises IOError if unable to write the file
+        """
+
+        if (metadata is None):
+            return None
+
+        if (not isinstance(metadata, OggFlacMetaData)):
+            from .text import ERR_FOREIGN_METADATA
+            raise ValueError(ERR_FOREIGN_METADATA)
+
+        #always overwrite Ogg FLAC with fresh metadata
+        #
+        #The trouble with Ogg FLAC padding is that Ogg header overhead
+        #requires a variable amount of overhead bytes per Ogg page
+        #which makes it very difficult to calculate how many
+        #bytes to allocate to the PADDING packet.
+        #We'd have to build a bunch of empty pages for padding
+        #then go back and fill-in the initial padding page's length
+        #field before re-checksumming it.
+
+        import tempfile
+
+        from .bitstream import BitstreamWriter
+        from .bitstream import BitstreamRecorder
+        from .bitstream import BitstreamAccumulator
+        from .bitstream import BitstreamReader
+        from .ogg import OggStreamReader, OggStreamWriter
+        from . import transfer_data
+
+        new_file = tempfile.TemporaryFile()
+        try:
+            original_file = file(self.filename, 'rb')
+            try:
+                original_reader = BitstreamReader(original_file, 1)
+                original_ogg = OggStreamReader(original_reader)
+
+                new_writer = BitstreamWriter(new_file, 1)
+                new_ogg = OggStreamWriter(new_writer,
+                                          self.__serial_number__)
+
+                #write our new comment blocks to the new file
+                metadata.build(new_ogg)
+
+                #skip the metadata packets in the original file
+                OggFlacMetaData.parse(original_reader)
+
+                #transfer the remaining pages from the original file
+                #(which are re-sequenced and re-checksummed automatically)
+                for (granule_position,
+                     segments,
+                     continuation,
+                     first_page,
+                     last_page) in original_ogg.pages():
+                    new_ogg.write_page(granule_position,
+                                       segments,
+                                       continuation,
+                                       first_page,
+                                       last_page)
+            finally:
+                original_file.close()
+
+            #copy temporary file data over our original file
+            original_file = file(self.filename, "wb")
+            try:
+                new_file.seek(0, 0)
+                transfer_data(new_file.read, original_file.write)
+                new_file.close()
+            finally:
+                original_file.close()
+        finally:
+            new_file.close()
+
+    def metadata_length(self):
+        """returns the length of all Ogg FLAC metadata blocks as an integer
+
+        this includes all Ogg page headers"""
+
+        from .bitstream import BitstreamReader
+
+        f = file(self.filename, 'rb')
+        try:
+            byte_count = __Counter__()
+            ogg_stream = BitstreamReader(f, 1)
+            ogg_stream.add_callback(byte_count.count_byte)
+
+            OggFlacMetaData.parse(ogg_stream)
+
+            return int(byte_count)
+        finally:
+            f.close()
+
+    def __read_streaminfo__(self):
+        from .bitstream import BitstreamReader
+
+        f = open(self.filename, "rb")
+        try:
+            ogg_reader = BitstreamReader(f, 1)
+            (magic_number,
+             version,
+             header_type,
+             granule_position,
+             self.__serial_number__,
+             page_sequence_number,
+             checksum,
+             segment_count) = ogg_reader.parse("4b 8u 8u 64S 32u 32u 32u 8u")
+
+            if (magic_number != 'OggS'):
+                from .text import ERR_OGG_INVALID_MAGIC_NUMBER
+                raise InvalidFLAC(ERR_OGG_INVALID_MAGIC_NUMBER)
+            if (version != 0):
+                from .text import ERR_OGG_INVALID_VERSION
+                raise InvalidFLAC(ERR_OGG_INVALID_VERSION)
+
+            segment_length = ogg_reader.read(8)
+
+            ogg_reader.set_endianness(0)
+
+            (packet_byte,
+             ogg_signature,
+             major_version,
+             minor_version,
+             self.__header_packets__,
+             flac_signature,
+             block_type,
+             block_length,
+             minimum_block_size,
+             maximum_block_size,
+             minimum_frame_size,
+             maximum_frame_size,
+             self.__samplerate__,
+             self.__channels__,
+             self.__bitspersample__,
+             self.__total_frames__,
+             self.__md5__) = ogg_reader.parse(
+                 "8u 4b 8u 8u 16u 4b 8u 24u 16u 16u 24u 24u 20u 3u 5u 36U 16b")
+
+            if (packet_byte != 0x7F):
+                from .text import ERR_OGGFLAC_INVALID_PACKET_BYTE
+                raise InvalidFLAC(ERR_OGGFLAC_INVALID_PACKET_BYTE)
+            if (ogg_signature != 'FLAC'):
+                from .text import ERR_OGGFLAC_INVALID_OGG_SIGNATURE
+                raise InvalidFLAC(ERR_OGGFLAC_INVALID_OGG_SIGNATURE)
+            if (major_version != 1):
+                from .text import ERR_OGGFLAC_INVALID_MAJOR_VERSION
+                raise InvalidFLAC(ERR_OGGFLAC_INVALID_MAJOR_VERSION)
+            if (minor_version != 0):
+                from .text import ERR_OGGFLAC_INVALID_MINOR_VERSION
+                raise InvalidFLAC(ERR_OGGFLAC_INVALID_MINOR_VERSION)
+            if (flac_signature != 'fLaC'):
+                from .text import ERR_OGGFLAC_VALID_FLAC_SIGNATURE
+                raise InvalidFLAC(ERR_OGGFLAC_VALID_FLAC_SIGNATURE)
+
+            self.__channels__ += 1
+            self.__bitspersample__ += 1
+        finally:
+            f.close()
+
+    def to_pcm(self):
+        """returns a PCMReader object containing the track's PCM data"""
+
+        from . import decoders
+        from . import PCMReaderError
+
+        try:
+            return decoders.OggFlacDecoder(self.filename,
+                                           self.channel_mask())
+        except (IOError, ValueError), msg:
+            #The only time this is likely to occur is
+            #if the Ogg FLAC is modified between when OggFlacAudio
+            #is initialized and when to_pcm() is called.
+            return PCMReaderError(error_message=str(msg),
+                                  sample_rate=self.sample_rate(),
+                                  channels=self.channels(),
+                                  channel_mask=int(self.channel_mask()),
+                                  bits_per_sample=self.bits_per_sample())
+
+    @classmethod
+    def from_pcm(cls, filename, pcmreader, compression=None):
+        """encodes a new file from PCM data
+
+        takes a filename string, PCMReader object
+        and optional compression level string
+        encodes a new audio file from pcmreader's data
+        at the given filename with the specified compression level
+        and returns a new OggFlacAudio object"""
+
+        from . import BIN
+        from . import transfer_framelist_data
+        from . import ignore_sigint
+        from . import EncodingError
+        from . import DecodingError
+        from . import UnsupportedChannelCount
+        from . import __default_quality__
+        import subprocess
+        import os
+
+        SUBSTREAM_SAMPLE_RATES = frozenset([8000,  16000, 22050, 24000, 32000,
+                                            44100, 48000, 96000])
+        SUBSTREAM_BITS = frozenset([8, 12, 16, 20, 24])
+
+        if ((compression is None) or (compression not in
+                                      cls.COMPRESSION_MODES)):
+            compression = __default_quality__(cls.NAME)
+
+        if (((pcmreader.sample_rate in SUBSTREAM_SAMPLE_RATES) and
+             (pcmreader.bits_per_sample in SUBSTREAM_BITS))):
+            lax = []
+        else:
+            lax = ["--lax"]
+
+        if (pcmreader.channels > 8):
+            raise UnsupportedChannelCount(filename, pcmreader.channels)
+
+        if (int(pcmreader.channel_mask) == 0):
+            if (pcmreader.channels <= 6):
+                channel_mask = {1: 0x0004,
+                                2: 0x0003,
+                                3: 0x0007,
+                                4: 0x0033,
+                                5: 0x0037,
+                                6: 0x003F}[pcmreader.channels]
+            else:
+                channel_mask = 0
+
+        elif (int(pcmreader.channel_mask) not in
+              (0x0001,    # 1ch - mono
+               0x0004,    # 1ch - mono
+               0x0003,    # 2ch - left, right
+               0x0007,    # 3ch - left, right, center
+               0x0033,    # 4ch - left, right, back left, back right
+               0x0603,    # 4ch - left, right, side left, side right
+               0x0037,    # 5ch - L, R, C, back left, back right
+               0x0607,    # 5ch - L, R, C, side left, side right
+               0x003F,    # 6ch - L, R, C, LFE, back left, back right
+               0x060F)):  # 6ch - L, R, C, LFE, side left, side right
+            from . import UnsupportedChannelMask
+
+            raise UnsupportedChannelMask(filename,
+                                         int(pcmreader.channel_mask))
+        else:
+            channel_mask = int(pcmreader.channel_mask)
+
+        devnull = file(os.devnull, 'ab')
+
+        sub = subprocess.Popen([BIN['flac']] + lax +
+                               ["-s", "-f", "-%s" % (compression),
+                                "-V", "--ogg",
+                                "--endian=little",
+                                "--channels=%d" % (pcmreader.channels),
+                                "--bps=%d" % (pcmreader.bits_per_sample),
+                                "--sample-rate=%d" % (pcmreader.sample_rate),
+                                "--sign=signed",
+                                "--force-raw-format",
+                                "-o", filename, "-"],
+                               stdin=subprocess.PIPE,
+                               stdout=devnull,
+                               stderr=devnull,
+                               preexec_fn=ignore_sigint)
+
+        try:
+            transfer_framelist_data(pcmreader, sub.stdin.write)
+        except (ValueError, IOError), err:
+            sub.stdin.close()
+            sub.wait()
+            cls.__unlink__(filename)
+            raise EncodingError(str(err))
+        except Exception, err:
+            sub.stdin.close()
+            sub.wait()
+            cls.__unlink__(filename)
+            raise err
+
+        try:
+            pcmreader.close()
+        except DecodingError, err:
+            raise EncodingError(err.error_message)
+        sub.stdin.close()
+        devnull.close()
+
+        if (sub.wait() == 0):
+            oggflac = OggFlacAudio(filename)
+            if ((((pcmreader.channels > 2) or
+                  (pcmreader.bits_per_sample > 16)) and
+                 (channel_mask != 0))):
+                metadata = oggflac.get_metadata()
+                vorbis = metadata.get_block(Flac_VORBISCOMMENT.BLOCK_ID)
+                vorbis[u"WAVEFORMATEXTENSIBLE_CHANNEL_MASK"] = [
+                    u"0x%.4X" % (channel_mask)]
+                oggflac.update_metadata(metadata)
+            return oggflac
+        else:
+            #FIXME
+            raise EncodingError(u"error encoding file with flac")
+
+    def sub_pcm_tracks(self):
+        """yields a PCMReader object per cuesheet track
+
+        this currently does nothing since the FLAC reference
+        decoder has limited support for Ogg FLAC
+        """
+
+        return iter([])
+
+    def verify(self, progress=None):
+        """verifies the current file for correctness
+
+        returns True if the file is okay
+        raises an InvalidFile with an error message if there is
+        some problem with the file"""
+
+        from .verify import ogg as verify_ogg_stream
+
+        #Ogg stream verification is likely to be so fast
+        #that individual calls to progress() are
+        #a waste of time.
+        if (progress is not None):
+            progress(0, 1)
+
+        try:
+            f = open(self.filename, 'rb')
+        except IOError, err:
+            raise InvalidFLAC(str(err))
+        try:
+            try:
+                result = verify_ogg_stream(f)
+                if (progress is not None):
+                    progress(1, 1)
+                return result is None
+            except (IOError, ValueError), err:
+                raise InvalidFLAC(str(err))
+        finally:
+            f.close()

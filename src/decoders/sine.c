@@ -1,10 +1,9 @@
 #include "sine.h"
-#include "../pcm.h"
-#include "pcm.h"
+#include "../pcmconv.h"
 
 /********************************************************
  Audio Tools, a module and set of tools for manipulating audio data
- Copyright (C) 2007-2011  Brian Langenberger
+ Copyright (C) 2007-2012  Brian Langenberger
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -21,12 +20,21 @@
  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 *******************************************************/
 
+#ifndef MIN
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
+#endif
+#ifndef MAX
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
+#endif
+
 int
 Sine_Mono_init(decoders_Sine_Mono* self, PyObject *args, PyObject *kwds) {
     double f1;
     double f2;
 
-    iaa_init(&(self->buffer), 1, 8);
+    self->buffer = array_ia_new();
+    if ((self->audiotools_pcm = open_audiotools_pcm()) == NULL)
+        return -1;
 
     if (!PyArg_ParseTuple(args, "iiidddd",
                           &(self->bits_per_sample),
@@ -47,20 +55,33 @@ Sine_Mono_init(decoders_Sine_Mono* self, PyObject *args, PyObject *kwds) {
         self->full_scale = 0x7FFFFF;
         break;
     default:
-        PyErr_SetString(PyExc_ValueError, "unsupported bits per sample");
+        PyErr_SetString(PyExc_ValueError, "bits per sample must be 8, 16, 24");
+        return -1;
+    }
+
+    if (self->total_pcm_frames < 0) {
+        PyErr_SetString(PyExc_ValueError, "total_pcm_frames must be >= 0");
+        return -1;
+    }
+
+    if (self->sample_rate < 1) {
+        PyErr_SetString(PyExc_ValueError, "sample_rate must be > 0");
         return -1;
     }
 
     self->remaining_pcm_frames = self->total_pcm_frames;
     self->delta1 = 2 * M_PI / (self->sample_rate / f1);
     self->delta2 = 2 * M_PI / (self->sample_rate / f2);
-    self->theta1 = self->theta1 = 0.0l;
+    self->theta1 = 0.0l;
+
+    self->closed = 0;
 
     return 0;
 }
 
 void Sine_Mono_dealloc(decoders_Sine_Mono* self) {
-    iaa_free(&(self->buffer));
+    self->buffer->del(self->buffer);
+    Py_XDECREF(self->audiotools_pcm);
 
     self->ob_type->tp_free((PyObject*)self);
 }
@@ -77,43 +98,46 @@ Sine_Mono_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
 
 static PyObject*
 Sine_Mono_read(decoders_Sine_Mono* self, PyObject* args) {
-    int byte_count;
+    int requested_frames;
     int frames_to_read;
-    int bytes_per_frame = self->bits_per_sample / 8;
     int i;
     double d;
-    ia_data_t ia;
-    struct i_array* buffer1;
+    int ia;
+    array_i* buffer1;
 
-    if (!PyArg_ParseTuple(args, "i", &byte_count))
+    if (self->closed) {
+        PyErr_SetString(PyExc_ValueError, "cannot read closed stream");
+        return NULL;
+    }
+
+    if (!PyArg_ParseTuple(args, "i", &requested_frames))
         return NULL;
 
-    byte_count -= (byte_count % bytes_per_frame);
-    frames_to_read = byte_count ? byte_count / bytes_per_frame : 1;
-    if (frames_to_read > self->remaining_pcm_frames)
-        frames_to_read = self->remaining_pcm_frames;
+    frames_to_read = MIN(MAX(requested_frames, 1), self->remaining_pcm_frames);
 
-    iaa_reset(&(self->buffer));
-    buffer1 = &(self->buffer.arrays[0]);
+    self->buffer->reset(self->buffer);
+    buffer1 = self->buffer->append(self->buffer);
 
     for (i = 0; i < frames_to_read; i++) {
         d = ((self->a1 * sin(self->theta1)) +
              (self->a2 * sin(self->theta2))) * (double)(self->full_scale);
 
-        ia = (ia_data_t)(d + 0.5);
-        ia_append(buffer1, ia);
+        ia = (int)(d + 0.5);
+        buffer1->append(buffer1, ia);
         self->theta1 += self->delta1;
         self->theta2 += self->delta2;
     }
 
     self->remaining_pcm_frames -= frames_to_read;
 
-    return ia_array_to_framelist(&(self->buffer), self->bits_per_sample);
+    return array_ia_to_FrameList(self->audiotools_pcm,
+                                 self->buffer,
+                                 self->bits_per_sample);
 }
 
 static PyObject*
 Sine_Mono_close(decoders_Sine_Mono* self, PyObject* args) {
-    self->remaining_pcm_frames = 0;
+    self->closed = 1;
 
     Py_INCREF(Py_None);
     return Py_None;
@@ -123,6 +147,7 @@ static PyObject*
 Sine_Mono_reset(decoders_Sine_Mono* self, PyObject* args) {
     self->remaining_pcm_frames = self->total_pcm_frames;
     self->theta1 = self->theta2 = 0.0l;
+    self->closed = 0;
 
     Py_INCREF(Py_None);
     return Py_None;
@@ -154,7 +179,10 @@ Sine_Stereo_init(decoders_Sine_Stereo* self, PyObject *args, PyObject *kwds) {
     double f1;
     double f2;
 
-    iaa_init(&(self->buffer), 2, 8);
+    self->buffer = array_ia_new();
+
+    if ((self->audiotools_pcm = open_audiotools_pcm()) == NULL)
+        return -1;
 
     if (!PyArg_ParseTuple(args, "iiiddddd",
                           &(self->bits_per_sample),
@@ -176,20 +204,33 @@ Sine_Stereo_init(decoders_Sine_Stereo* self, PyObject *args, PyObject *kwds) {
         self->full_scale = 0x7FFFFF;
         break;
     default:
-        PyErr_SetString(PyExc_ValueError, "unsupported bits per sample");
+        PyErr_SetString(PyExc_ValueError, "bits per sample must be 8, 16, 24");
+        return -1;
+    }
+
+    if (self->total_pcm_frames < 0) {
+        PyErr_SetString(PyExc_ValueError, "total_pcm_frames must be >= 0");
+        return -1;
+    }
+
+    if (self->sample_rate < 1) {
+        PyErr_SetString(PyExc_ValueError, "sample_rate must be > 0");
         return -1;
     }
 
     self->remaining_pcm_frames = self->total_pcm_frames;
     self->delta1 = 2 * M_PI / (self->sample_rate / f1);
     self->delta2 = 2 * M_PI / (self->sample_rate / f2);
-    self->theta1 = self->theta1 = 0.0l;
+    self->theta1 = self->theta2 = 0.0l;
+
+    self->closed = 0;
 
     return 0;
 }
 
 void Sine_Stereo_dealloc(decoders_Sine_Stereo* self) {
-    iaa_free(&(self->buffer));
+    self->buffer->del(self->buffer);
+    Py_XDECREF(self->audiotools_pcm);
 
     self->ob_type->tp_free((PyObject*)self);
 }
@@ -205,49 +246,52 @@ Sine_Stereo_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
 
 static PyObject*
 Sine_Stereo_read(decoders_Sine_Stereo* self, PyObject* args) {
-    int byte_count;
+    int requested_frames;
     int frames_to_read;
-    int bytes_per_frame = 2 * (self->bits_per_sample / 8);
     int i;
     double d;
-    ia_data_t ia;
-    struct i_array* buffer1;
-    struct i_array* buffer2;
+    int ia;
+    array_i* buffer1;
+    array_i* buffer2;
 
-    if (!PyArg_ParseTuple(args, "i", &byte_count))
+    if (self->closed) {
+        PyErr_SetString(PyExc_ValueError, "cannot read closed stream");
+        return NULL;
+    }
+
+    if (!PyArg_ParseTuple(args, "i", &requested_frames))
         return NULL;
 
-    byte_count -= (byte_count % bytes_per_frame);
-    frames_to_read = byte_count ? byte_count / bytes_per_frame : 1;
-    if (frames_to_read > self->remaining_pcm_frames)
-        frames_to_read = self->remaining_pcm_frames;
+    frames_to_read = MIN(MAX(requested_frames, 1), self->remaining_pcm_frames);
 
-    iaa_reset(&(self->buffer));
-    buffer1 = &(self->buffer.arrays[0]);
-    buffer2 = &(self->buffer.arrays[1]);
+    self->buffer->reset(self->buffer);
+    buffer1 = self->buffer->append(self->buffer);
+    buffer2 = self->buffer->append(self->buffer);
 
     for (i = 0; i < frames_to_read; i++) {
         d = ((self->a1 * sin(self->theta1)) +
              (self->a2 * sin(self->theta2))) * (double)(self->full_scale);
-        ia = (ia_data_t)(d + 0.5);
-        ia_append(buffer1, ia);
+        ia = (int)(d + 0.5);
+        buffer1->append(buffer1, ia);
         d = -((self->a1 * sin(self->theta1 * self->fmult)) +
               (self->a2 * sin(self->theta2 * self->fmult))) *
             (double)(self->full_scale);
-        ia = (ia_data_t)(d + 0.5);
-        ia_append(buffer2, ia);
+        ia = (int)(d + 0.5);
+        buffer2->append(buffer2, ia);
         self->theta1 += self->delta1;
         self->theta2 += self->delta2;
     }
 
     self->remaining_pcm_frames -= frames_to_read;
 
-    return ia_array_to_framelist(&(self->buffer), self->bits_per_sample);
+    return array_ia_to_FrameList(self->audiotools_pcm,
+                                 self->buffer,
+                                 self->bits_per_sample);
 }
 
 static PyObject*
 Sine_Stereo_close(decoders_Sine_Stereo* self, PyObject* args) {
-    self->remaining_pcm_frames = 0;
+    self->closed = 1;
 
     Py_INCREF(Py_None);
     return Py_None;
@@ -257,6 +301,7 @@ static PyObject*
 Sine_Stereo_reset(decoders_Sine_Stereo* self, PyObject* args) {
     self->remaining_pcm_frames = self->total_pcm_frames;
     self->theta1 = self->theta2 = 0.0l;
+    self->closed = 0;
 
     Py_INCREF(Py_None);
     return Py_None;
@@ -285,7 +330,10 @@ Sine_Stereo_channel_mask(decoders_Sine_Stereo *self, void *closure) {
 
 int
 Sine_Simple_init(decoders_Sine_Simple* self, PyObject *args, PyObject *kwds) {
-    iaa_init(&(self->buffer), 1, 8);
+    self->buffer = array_ia_new();
+
+    if ((self->audiotools_pcm = open_audiotools_pcm()) == NULL)
+        return -1;
 
     if (!PyArg_ParseTuple(args, "iiiii",
                           &(self->total_pcm_frames),
@@ -295,14 +343,38 @@ Sine_Simple_init(decoders_Sine_Simple* self, PyObject *args, PyObject *kwds) {
                           &(self->count)))
         return -1;
 
+    switch (self->bits_per_sample) {
+    case 8:
+    case 16:
+    case 24:
+        break;
+    default:
+        PyErr_SetString(PyExc_ValueError, "bits per sample must be 8, 16, 24");
+        return -1;
+    }
+
+    if (self->total_pcm_frames < 0) {
+        PyErr_SetString(PyExc_ValueError, "total_pcm_frames must be >= 0");
+        return -1;
+    }
+
+    if (self->sample_rate < 1) {
+        PyErr_SetString(PyExc_ValueError, "sample_rate must be > 0");
+        return -1;
+    }
+
+
     self->remaining_pcm_frames = self->total_pcm_frames;
     self->i = 0;
+
+    self->closed = 0;
 
     return 0;
 }
 
 void Sine_Simple_dealloc(decoders_Sine_Simple* self) {
-    iaa_free(&(self->buffer));
+    self->buffer->del(self->buffer);
+    Py_XDECREF(self->audiotools_pcm);
 
     self->ob_type->tp_free((PyObject*)self);
 }
@@ -319,42 +391,46 @@ Sine_Simple_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
 
 static PyObject*
 Sine_Simple_read(decoders_Sine_Simple* self, PyObject* args) {
-    int byte_count;
+    int requested_frames;
     int frames_to_read;
-    int bytes_per_frame = self->bits_per_sample / 8;
     int i;
-    struct i_array* buffer;
+    array_i* buffer;
     double d;
-    ia_data_t ia;
+    int ia;
 
-    if (!PyArg_ParseTuple(args, "i", &byte_count))
+    if (self->closed) {
+        PyErr_SetString(PyExc_ValueError, "cannot read closed stream");
+        return NULL;
+    }
+
+
+    if (!PyArg_ParseTuple(args, "i", &requested_frames))
         return NULL;
 
-    iaa_reset(&(self->buffer));
-    buffer = &(self->buffer.arrays[0]);
+    self->buffer->reset(self->buffer);
+    buffer = self->buffer->append(self->buffer);
 
-    byte_count -= (byte_count % bytes_per_frame);
-    frames_to_read = byte_count ? byte_count / bytes_per_frame : 1;
-    if (frames_to_read > self->remaining_pcm_frames)
-        frames_to_read = self->remaining_pcm_frames;
+    frames_to_read = MIN(MAX(requested_frames, 1), self->remaining_pcm_frames);
 
     for (i = 0; i < frames_to_read; i++) {
         d = (double)(self->max_value) *
             sin(((M_PI * 2) *
                  (double)(self->i % self->count)) /
                 (double)(self->count));
-        ia = (ia_data_t)(round(d));
-        ia_append(buffer, ia);
+        ia = (int)(round(d));
+        buffer->append(buffer, ia);
         self->i += 1;
     }
 
     self->remaining_pcm_frames -= frames_to_read;
-    return ia_array_to_framelist(&(self->buffer), self->bits_per_sample);
+    return array_ia_to_FrameList(self->audiotools_pcm,
+                                 self->buffer,
+                                 self->bits_per_sample);
 }
 
 static PyObject*
 Sine_Simple_close(decoders_Sine_Simple* self, PyObject* args) {
-    self->remaining_pcm_frames = 0;
+    self->closed = 1;
 
     Py_INCREF(Py_None);
     return Py_None;
@@ -364,6 +440,7 @@ static PyObject*
 Sine_Simple_reset(decoders_Sine_Simple* self, PyObject* args) {
     self->i = 0;
     self->remaining_pcm_frames = self->total_pcm_frames;
+    self->closed = 0;
 
     Py_INCREF(Py_None);
     return Py_None;
@@ -388,5 +465,3 @@ static PyObject*
 Sine_Simple_channel_mask(decoders_Sine_Simple *self, void *closure) {
     return Py_BuildValue("i", 0x4);
 }
-
-#include "pcm.c"

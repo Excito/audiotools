@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 #Audio Tools, a module and set of tools for manipulating audio data
-#Copyright (C) 2007-2011  Brian Langenberger
+#Copyright (C) 2007-2012  Brian Langenberger
 
 #This program is free software; you can redistribute it and/or modify
 #it under the terms of the GNU General Public License as published by
@@ -21,55 +21,56 @@
 import os
 import os.path
 import sys
-import audiotools
-import audiotools.toc
 import tempfile
 import subprocess
-import gettext
-
-gettext.install("audiotools", unicode=True)
+import audiotools
+import audiotools.toc
+import audiotools.text as _
 
 MAX_CPUS = audiotools.MAX_JOBS
 
 
-def convert_to_wave(audiofile, wave_filename, messenger):
+def convert_to_wave(progress, audiofile, wave_filename):
     try:
-        if ((audiofile.sample_rate() == 44100) and
-            (audiofile.channels() == 2) and
-            (audiofile.bits_per_sample() == 16)):  # already CD quality
-            audiofile.convert(wave_filename, audiotools.WaveAudio)
+        if (((audiofile.sample_rate() == 44100) and
+             (audiofile.channels() == 2) and
+             (audiofile.bits_per_sample() == 16))):  # already CD quality
+            audiofile.convert(target_path=wave_filename,
+                              target_class=audiotools.WaveAudio,
+                              progress=progress)
+
         else:                                      # convert to CD quality
-            pcm = audiotools.PCMConverter(
-                audiofile.to_pcm(),
-                sample_rate=44100,
-                channels=2,
-                channel_mask=audiotools.ChannelMask.from_channels(2),
-                bits_per_sample=16)
+            pcm = audiotools.PCMReaderProgress(
+                pcmreader=audiotools.PCMConverter(
+                    audiofile.to_pcm(),
+                    sample_rate=44100,
+                    channels=2,
+                    channel_mask=audiotools.ChannelMask.from_channels(2),
+                    bits_per_sample=16),
+                total_frames=(audiofile.total_frames() *
+                              44100 / audiofile.sample_rate()),
+                progress=progress)
             audiotools.WaveAudio.from_pcm(wave_filename, pcm)
             pcm.close()
 
-        messenger.info(u"* %s" % (messenger.filename(audiofile.filename)))
     except audiotools.EncodingError, err:
-        messenger.error(_(u"%(filename): %(message)s") %
-                        {"filename": audiofile.filename,
-                         "message": err})
+        pass
 
 
 if (__name__ == '__main__'):
     parser = audiotools.OptionParser(
-        usage=_(u"%prog [options] <track 1> [track 2] ..."),
+        usage=_.USAGE_TRACK2CD,
         version="Python Audio Tools %s" % (audiotools.VERSION))
 
     parser.add_option(
         "-c", "--cdrom", dest="dev",
-        default=audiotools.DEFAULT_CDROM,
-        help=_(u"cdrom device to use"))
+        default=audiotools.DEFAULT_CDROM)
 
     parser.add_option(
         "-s", "--speed", dest="speed",
         default=20,
         type="int",
-        help=_(u"the speed to burn the CD at"))
+        help=_.OPT_SPEED)
 
     parser.add_option(
         '--cue',
@@ -77,7 +78,7 @@ if (__name__ == '__main__'):
         type='string',
         dest='cuesheet',
         metavar='FILENAME',
-        help=_(u'the cuesheet to use for writing tracks'))
+        help=_.OPT_CUESHEET_TRACK2CD)
 
     parser.add_option(
         '-j', '--joint',
@@ -85,7 +86,7 @@ if (__name__ == '__main__'):
         type='int',
         default=MAX_CPUS,
         dest='max_processes',
-        help=_(u'the maximum number of processes to run at a time'))
+        help=_.OPT_JOINT)
 
     parser.add_option(
         '-V', '--verbose',
@@ -93,31 +94,34 @@ if (__name__ == '__main__'):
         dest='verbosity',
         choices=audiotools.VERBOSITY_LEVELS,
         default=audiotools.DEFAULT_VERBOSITY,
-        help=_(u'the verbosity level to execute at'))
+        help=_.OPT_VERBOSE)
 
     (options, args) = parser.parse_args()
     msg = audiotools.Messenger("track2cd", options)
 
     if (options.max_processes < 1):
-        msg.error(_(u'You must run at least 1 process at a time'))
+        msg.error(_.ERR_INVALID_JOINT)
         sys.exit(1)
     else:
         max_processes = options.max_processes
 
-    audiofiles = audiotools.open_files(args, sorted=False, messenger=msg)
+    audiofiles = audiotools.open_files(args,
+                                       sorted=False,
+                                       messenger=msg,
+                                       warn_duplicates=True)
 
     if (len(audiofiles) < 1):
-        msg.error(_(u"You must specify at least 1 supported audio file"))
+        msg.error(_.ERR_FILES_REQUIRED)
         sys.exit(1)
 
-    if ((len(audiofiles) == 1) and
-        (audiofiles[0].get_cuesheet() is not None)):
+    if (((len(audiofiles) == 1) and
+         (audiofiles[0].get_cuesheet() is not None))):
         #writing a single file with an embedded cuesheet
         #so extract its contents to wave/cue and call cdrdao
 
         if (not audiotools.BIN.can_execute(audiotools.BIN['cdrdao'])):
-            msg.error(_(u'Unable to find "cdrdao" executable'))
-            msg.info(_(u'Please install "cdrdao" to burn CDs'))
+            msg.error(_.ERR_NO_CDRDAO)
+            msg.info(_.ERR_GET_CDRDAO)
             sys.exit(1)
 
         cuesheet = audiofiles[0].get_cuesheet()
@@ -125,23 +129,41 @@ if (__name__ == '__main__'):
         temptoc = tempfile.NamedTemporaryFile(suffix='.toc')
         tempwav = tempfile.NamedTemporaryFile(suffix='.wav')
 
-        temptoc.write(audiotools.toc.TOCFile.file(
+        temptoc.write(
+            audiotools.toc.TOCFile.file(
                 cuesheet, os.path.basename(tempwav.name)))
         temptoc.flush()
 
-        msg.info(_(u"Converting audio file"))
+        progress = audiotools.SingleProgressDisplay(
+            msg, _.LAB_CONVERTING_FILE)
 
-        if ((audiofiles[0].sample_rate() == 44100) and
-            (audiofiles[0].channels() == 2) and
-            (audiofiles[0].bits_per_sample() == 16)):
+        if (((audiofiles[0].sample_rate() == 44100) and
+             (audiofiles[0].channels() == 2) and
+             (audiofiles[0].bits_per_sample() == 16))):
+            #already CD quality, so no additional conversion necessary
             temptrack = audiotools.WaveAudio.from_pcm(
                 tempwav.name,
-                audiofiles[0].to_pcm())
+                audiotools.PCMReaderProgress(
+                    pcmreader=audiofiles[0].to_pcm(),
+                    total_frames=audiofiles[0].total_frames(),
+                    progress=progress.update))
         else:
+            #not CD quality, so convert and adjust total frames as needed
             temptrack = audiotools.WaveAudio.from_pcm(
-                    tempwav.name,
-                    audiotools.PCMConverter(audiofiles[0].to_pcm(),
-                                            44100, 2, 16))
+                tempwav.name,
+                audiotools.PCMReaderProgress(
+                    pcmreader=audiotools.PCMConverter(
+                        pcmreader=audiofiles[0].to_pcm(),
+                        sample_rate=44100,
+                        channels=2,
+                        channel_mask=0x3,
+                        bits_per_sample=16),
+                    total_frames=(audiofiles[0].total_frames() *
+                                  44100 /
+                                  audiofiles[0].sample_rate()),
+                    progress=progress.update))
+
+        progress.clear()
 
         os.chdir(os.path.dirname(tempwav.name))
         cdrdao_args = [audiotools.BIN["cdrdao"], "write"]
@@ -172,20 +194,20 @@ if (__name__ == '__main__'):
         #so combine them into a single wave/cue and call cdrdao
 
         if (not audiotools.BIN.can_execute(audiotools.BIN['cdrdao'])):
-            msg.error(_(u'Unable to find "cdrdao" executable'))
-            msg.info(_(u'Please install "cdrdao" to burn CDs'))
+            msg.error(_.ERR_NO_CDRDAO)
+            msg.info(_.ERR_GET_CDRDAO)
             sys.exit(1)
 
         if (len(set([f.sample_rate() for f in audiofiles])) != 1):
-            msg.error(_(u"All audio files must have the same sample rate"))
+            msg.error(_.ERR_SAMPLE_RATE_MISMATCH)
             sys.exit(1)
 
         if (len(set([f.channels() for f in audiofiles])) != 1):
-            msg.error(_(u"All audio files must have the same channel count"))
+            msg.error(_.ERR_CHANNEL_COUNT_MISMATCH)
             sys.exit(1)
 
         if (len(set([f.bits_per_sample() for f in audiofiles])) != 1):
-            msg.error(_(u"All audio files must have the same bits per sample"))
+            msg.error(_.ERR_BPS_MISMATCH)
             sys.exit(1)
 
         try:
@@ -197,28 +219,37 @@ if (__name__ == '__main__'):
         temptoc = tempfile.NamedTemporaryFile(suffix='.toc')
         tempwav = tempfile.NamedTemporaryFile(suffix='.wav')
 
-        temptoc.write(audiotools.toc.TOCFile.file(
-                toc, os.path.basename(tempwav.name)))
+        temptoc.write(
+            audiotools.toc.TOCFile.file(toc, os.path.basename(tempwav.name)))
         temptoc.flush()
 
-        msg.info(_(u"Converting audio files"))
+        input_frames = sum([af.total_frames() for af in audiofiles])
 
-        if ((audiofiles[0].sample_rate() == 44100) and
-            (audiofiles[0].channels() == 2) and
-            (audiofiles[0].bits_per_sample() == 16)):
-            pcmreader = \
-                audiotools.PCMCat(iter([af.to_pcm() for af in audiofiles]))
+        if (((audiofiles[0].sample_rate() == 44100) and
+             (audiofiles[0].channels() == 2) and
+             (audiofiles[0].bits_per_sample() == 16))):
+            pcmreader = audiotools.PCMCat([af.to_pcm() for af in audiofiles])
+            output_frames = input_frames
         else:
             #this presumes a cuesheet and non-CD audio
             #though theoretically possible, it's difficult to
             #envision a case in which this happens
-            pcmreader = \
-                audiotools.PCMConverter(audiotools.PCMCat(
-                    iter([af.to_pcm() for af in audiofiles])),
-                                        44100, 2, 16)
+            pcmreader = audiotools.PCMConverter(
+                pcmreader=audiotools.PCMCat(
+                    [af.to_pcm() for af in audiofiles]),
+                sample_rate=44100,
+                channels=2,
+                channel_mask=0x3,
+                bits_per_sample=16)
+            output_frames = (input_frames * 44100 /
+                             audiofiles[0].sample_rate())
+
+        progress = audiotools.SingleProgressDisplay(
+            msg, _.LAB_CONVERTING_FILE)
 
         try:
-            write_offset = int(audiotools.config.get_default(
+            write_offset = int(
+                audiotools.config.get_default(
                     "System", "cdrom_write_offset", "0"))
         except ValueError:
             write_offset = 0
@@ -226,14 +257,21 @@ if (__name__ == '__main__'):
         if (write_offset == 0):
             temptrack = audiotools.WaveAudio.from_pcm(
                 tempwav.name,
-                pcmreader)
+                audiotools.PCMReaderProgress(
+                    pcmreader=pcmreader,
+                    total_frames=output_frames,
+                    progress=progress.update))
         else:
             temptrack = audiotools.WaveAudio.from_pcm(
                 tempwav.name,
-                audiotools.PCMReaderWindow(pcmreader,
-                                           write_offset,
-                                           sum([track.total_frames()
-                                                for track in audiofiles])))
+                audiotools.PCMReaderProgress(
+                    pcmreader=audiotools.PCMReaderWindow(pcmreader,
+                                                         write_offset,
+                                                         input_frames),
+                    total_frames=output_frames,
+                    progress=progress_update))
+
+        progress.clear()
 
         os.chdir(os.path.dirname(tempwav.name))
         cdrdao_args = [audiotools.BIN["cdrdao"], "write"]
@@ -263,8 +301,8 @@ if (__name__ == '__main__'):
         #so extract them to waves and call cdrecord
 
         if (not audiotools.BIN.can_execute(audiotools.BIN['cdrecord'])):
-            msg.error(_(u'Unable to find "cdrecord" executable'))
-            msg.info(_(u'Please install "cdrecord" to burn CDs'))
+            msg.error(_.ERR_NO_CDRECORD)
+            msg.info(_.ERR_GET_CDRECORD)
             sys.exit(1)
 
         exec_args = [audiotools.BIN['cdrecord']]
@@ -276,14 +314,13 @@ if (__name__ == '__main__'):
         exec_args.append(options.dev)
 
         exec_args.append("-dao")
-        exec_args.append("-pad")
         exec_args.append("-audio")
 
         temp_pool = []
         wave_files = []
-        queue = audiotools.ExecQueue()
 
-        msg.info(_(u"Converting audio files"))
+        queue = audiotools.ExecProgressQueue(audiotools.ProgressDisplay(msg))
+
         for audiofile in audiofiles:
             if (isinstance(audiofile, audiotools.WaveAudio)):
                 wave_files.append(audiofile.filename)
@@ -291,19 +328,21 @@ if (__name__ == '__main__'):
                 f = tempfile.mkstemp(suffix='.wav')
                 temp_pool.append(f)
                 wave_files.append(f[1])
-                queue.execute(convert_to_wave,
-                              (audiofile,
-                               f[1],
-                               msg))
+                queue.execute(
+                    function=convert_to_wave,
+                    progress_text=audiotools.Filename(audiofile.filename),
+                    audiofile=audiofile,
+                    wave_filename=f[1])
 
         queue.run(max_processes)
+
         try:
             for wave in wave_files:
                 audiotools.open(wave).verify()
         except (audiotools.UnsupportedFile,
                 audiotools.InvalidFile,
                 IOError):
-            msg.error(_(u"Not all files are valid.  Unable to write CD"))
+            msg.error(_.ERR_TRACK2CD_INVALIDFILE)
             sys.exit(1)
 
         exec_args += wave_files

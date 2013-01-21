@@ -33,6 +33,7 @@ classes and functions upon which all of the other modules depend.
    MP3Audio      MPEG-1 Layer 3
    MP2Audio      MPEG-1 Layer 2
    OggFlacAudio  Ogg Free Lossless Audio Codec
+   OpusAudio     Opus Audio Codec
    ShortenAudio  Shorten
    SpeexAudio    Ogg Speex
    VorbisAudio   Ogg Vorbis
@@ -40,11 +41,31 @@ classes and functions upon which all of the other modules depend.
    WavPackAudio  WavPack
    ============= ==================================
 
+.. data:: DEFAULT_TYPE
+
+   The default type to use as a plain string, such as ``'wav'`` or ``'flac'``.
+
+.. data:: DEFAULT_QUALITY
+
+   A dict of type name strings -> quality value strings
+   indicating the default compression quality value for the given type
+   name suitable for :meth:`AudioFile.from_pcm` and :meth:`AudioFile.convert`
+   method calls.
+
+.. data:: DEFAULT_CDROM
+
+   The default CD-ROM device to use for CD audio and DVD-Audio
+   extraction as a plain string.
+
 .. data:: TYPE_MAP
 
-   A dictionary of type_name strings -> :class:`AudioFile`
+   A dictionary of type name strings -> :class:`AudioFile`
    values containing only types which have all required binaries
    installed.
+
+.. data:: FILENAME_FORMAT
+
+   The default format string to use for newly created files.
 
 .. data:: BIN
 
@@ -63,6 +84,37 @@ classes and functions upon which all of the other modules depend.
    >>> BIN.can_execute(BIN["flac"])
    True
 
+.. data:: IO_ENCODING
+
+   The defined encoding to use for output to the screen as a plain
+   string.
+   This is typically ``'utf-8'``.
+
+.. data:: FS_ENCODING
+
+   The defined encoding to use for filenames read and written to disk
+   as a plain string.
+   This is typically ``'utf-8'``.
+
+.. data:: MAX_JOBS
+
+   The maximum number of simultaneous jobs to run at once by default
+   as an integer.
+   This may be defined from the user's config file.
+   Otherwise, if Python's ``multiprocessing`` module is available,
+   this is set to the user's CPU count.
+   If neither is available, this is set to 1.
+
+.. function:: file_type(file)
+
+   Given a seekable file object rewound to the file's start,
+   returns an :class:`AudioFile`-compatible class of the stream's
+   detected type, or ``None`` if the stream's type is unknown.
+
+   The :class:`AudioFile` class may not be available for use
+   and so its :meth:`AudioFile.has_binaries` classmethod
+   may need to be checked separately.
+
 .. function:: open(filename)
 
    Opens the given filename string and returns an :class:`AudioFile`-compatible
@@ -71,16 +123,29 @@ classes and functions upon which all of the other modules depend.
    not supported.
    Raises :exc:`IOError` if the file cannot be opened at all.
 
-.. function:: open_files(filenames[, sorted[, messenger]])
+.. function:: open_files(filenames[, sorted][, messenger][, no_duplicates][, warn_duplicates][, opened_files])
 
    Given a list of filename strings, returns a list of
-   :class:`AudioFile`-compatible objects which can be successfully opened.
+   :class:`AudioFile`-compatible objects which are successfully opened.
    By default, they are returned sorted by album number and track number.
+
    If ``sorted`` is ``False``, they are returned in the same order
    as they appear in the filenames list.
+
    If ``messenger`` is given, use that :class:`Messenger` object
    to for warnings if files cannot be opened.
    Otherwise, such warnings are sent to stdout.
+
+   If ``no_duplicates`` is ``True``, attempting to open
+   the same file twice raises a :exc:`DuplicateFile` exception.
+
+   If ``no_duplicates`` is ``False`` and ``warn_duplicates`` is ``True``,
+   attempting to open the same file twice results in a
+   warning to ``messenger``, if present.
+
+   ``opened_files``, if present, is a set of previously opened
+   :class:`Filename` objects for the purpose of detecting duplicates.
+   Any opened files are added to that set.
 
 .. function:: open_directory(directory[, sorted[, messenger]])
 
@@ -112,9 +177,9 @@ classes and functions upon which all of the other modules depend.
    ``from_function`` with an integer argument (presumably a string)
    until that object's length is 0.
 
-   >>> infile = open("input.txt","r")
-   >>> outfile = open("output.txt","w")
-   >>> transfer_data(infile.read,outfile.write)
+   >>> infile = open("input.txt", "r")
+   >>> outfile = open("output.txt", "w")
+   >>> transfer_data(infile.read, outfile.write)
    >>> infile.close()
    >>> outfile.close()
 
@@ -162,13 +227,6 @@ classes and functions upon which all of the other modules depend.
    each limited to the given lengths.
    The original pcmreader is closed upon the iterator's completion.
 
-.. function:: applicable_replay_gain(audiofiles)
-
-   Takes a list of :class:`AudioFile`-compatible objects.
-   Returns ``True`` if ReplayGain can be applied to those files
-   based on their sample rate, number of channels, and so forth.
-   Returns ``False`` if not.
-
 .. function:: calculate_replay_gain(audiofiles)
 
    Takes a list of :class:`AudioFile`-compatible objects.
@@ -198,6 +256,46 @@ classes and functions upon which all of the other modules depend.
    If ``progress`` is ``None``, the audiofile's PCM stream
    is returned as-is.
 
+Filename Objects
+----------------
+
+.. class:: Filename(filename)
+
+   :class:`Filename` is a file which may or may not exist on disk.
+   ``filename`` is a raw string of the actual filename.
+   Filename objects are immutable and hashable,
+   which means they can be used as dictionary keys
+   or placed in sets.
+
+   The purpose of Filename objects is for easier
+   conversion of raw string filename paths to Unicode,
+   and to make it easier to detect filenames
+   which point to the same file on disk.
+
+   The former case is used by utilities to display
+   output about file operations in progress.
+   The latter case is for utilities
+   which need to avoid overwriting input files
+   with output files.
+
+.. function:: Filename.__str__()
+
+   Returns the raw string of the actual filename after
+   being normalized.
+
+.. function:: Filename.__unicode__()
+
+   Returns a Unicode string of the filename after being decoded
+   through :attr:`FS_ENCODING`.
+
+.. function:: Filename.__eq__(filename)
+
+   Filename objects which exist on disk hash and compare equally
+   if their device ID and inode number values match
+   (the ``st_dev`` and ``st_ino`` fields according to stat(2)).
+   Filename objects which don't exist on disk hash and compare
+   equally if their filename string matches.
+
 AudioFile Objects
 -----------------
 
@@ -223,6 +321,11 @@ AudioFile Objects
    function for inferring the file format from its name.
    However, it need not be unique among all formats.
 
+.. attribute:: AudioFile.DESCRIPTION
+
+   A longer, descriptive name for the audio type as a Unicode string.
+   This is meant to be human-readable.
+
 .. attribute:: AudioFile.COMPRESSION_MODES
 
    A tuple of valid compression level strings, for use with the
@@ -238,7 +341,7 @@ AudioFile Objects
 
 .. attribute:: AudioFile.COMPRESSION_DESCRIPTIONS
 
-   A dict of compression descriptions, as unicode strings.
+   A dict of compression descriptions, as Unicode strings.
    The key is a valid compression mode string.
    Not all compression modes need have a description;
    some may be left blank.
@@ -256,14 +359,6 @@ AudioFile Objects
    order to use the :meth:`add_replay_gain` classmethod.
    This tuple may be empty if the format requires no binaries
    or has no ReplayGain support.
-
-.. classmethod:: AudioFile.is_type(file)
-
-   Takes a file-like object with :meth:`read` and :meth:`seek` methods
-   that's reset to the beginning of the stream.
-   Returns ``True`` if the file is determined to be of the same type
-   as this particular :class:`AudioFile` implementation.
-   Returns ``False`` if not.
 
 .. method:: AudioFile.bits_per_sample()
 
@@ -311,6 +406,33 @@ AudioFile Objects
    Takes a :class:`MetaData`-compatible object and sets this audio file's
    metadata to that value, if possible.
    Raises :exc:`IOError` if a problem occurs when writing the file.
+
+.. method:: AudioFile.update_metadata(metadata)
+
+   Takes the :class:`MetaData`-compatible object returned by this
+   audio file's :meth:`AudioFile.get_metadata` method
+   and sets this audiofile's metadata to that value, if possible.
+   Raises :exc:`IOError` if a problem occurs when writing the file.
+
+.. note::
+
+   What's the difference between :meth:`AudioFile.set_metadata`
+   and :meth:`AudioFile.update_metadata`?
+
+   Metadata implementations may also contain side information
+   such as track length, file encoder, and so forth.
+   :meth:`AudioFile.set_metadata` presumes the :class:`MetaData`
+   object is from a different :class:`AudioFile` object or has
+   been built from scratch.
+   Therefore, it will update the newly added
+   metadata side info as needed so as to not break the file.
+
+   :meth:`AudioFile.update_metadata` presumes the :class:`MetaData`
+   object is either taken from the original :class:`AudioFile` object
+   or has been carefully constructed to not break anything when
+   applied to the file.
+   It is a lower-level routine which does *not* update metadata side info
+   (which may be necessary when modifying that side info is required).
 
 .. method:: AudioFile.get_metadata()
 
@@ -420,8 +542,8 @@ AudioFile Objects
 
    Returns this audio file's album number as a non-negative integer.
    This method first checks the file's metadata values.
-   If unable to find one, it then tries to determine an album number
-   from the track's filename.
+   If unable to find metadata,
+   it then tries to determine an album number from the track's filename.
    If that method is also unsuccessful, it returns 0.
 
 .. classmethod:: AudioFile.track_name(file_path[, track_metadata[, format[, suffix]]])
@@ -473,11 +595,9 @@ AudioFile Objects
    that is called as needed during ReplayGain application to indicate
    progress - identical to the argument used by :meth:`convert`.
 
-.. classmethod:: AudioFile.can_add_replay_gain()
+.. classmethod:: AudioFile.supports_replay_gain()
 
-   Returns ``True`` if this audio class supports ReplayGain
-   and we have the necessary binaries to apply it.
-   Returns ``False`` if not.
+   Returns ``True`` if this class supports ReplayGain metadata.
 
 .. classmethod:: AudioFile.lossless_replay_gain()
 
@@ -485,6 +605,12 @@ AudioFile Objects
    lossless process - such as by adding a metadata tag of some sort.
    Returns ``False`` if applying metadata modifies the audio file
    data itself.
+
+.. classmethod:: AudioFile.can_add_replay_gain(audiofiles)
+
+   Given a list of :class:`AudioFile` objects,
+   returns ``True`` if this class can run :meth:`AudioFile.add_replay_gain`
+   on those objects, ``False`` if not.
 
 .. method:: AudioFile.replay_gain()
 
@@ -506,6 +632,20 @@ AudioFile Objects
    or ``None`` if no cuesheet is embedded.
    Raises :exc:`IOError` if some error occurs when reading the file.
 
+.. method:: AudioFile.clean(fixes_performed[, output_filename])
+
+   Cleans the audio file of known data and metadata problems.
+   ``fixes_performed`` is a list-like object which is appended
+   with Unicode strings of the fixes performed.
+
+   ``output_filename`` is an optional string in which the fixed
+   audio file is placed.
+   If omitted, no actual fixes are performed.
+   Note that this method never modifies the original file.
+
+   Raises :exc:`IOError` if some error occurs when writing the new file.
+   Raises :exc:`ValueError` if the file itself is invalid.
+
 .. classmethod:: AudioFile.has_binaries(system_binaries)
 
    Takes the :attr:`audiotools.BIN` object of system binaries.
@@ -525,27 +665,32 @@ This is accomplished by implementing three additional methods.
 
 .. class:: WaveContainer
 
-.. method:: WaveContainer.to_wave(wave_filename[, progress])
-
-   Creates a Wave file with the given filename string
-   from our data, with any stored chunks intact.
-   ``progress``, if given, functions identically to the
-   :meth:`AudioFile.convert` method.
-   May raise :exc:`EndodingError` if some problem occurs during encoding.
-
-.. classmethod:: WaveContainer.from_wave(filename, wave_filename[, compression[, progress]])
-
-   Like :meth:`AudioFile.from_pcm`, creates a file with our class
-   at the given ``filename`` string, from the given ``wave_filename``
-   string and returns a new object of our class.
-   ``compression`` is an optional compression level string
-   and ``progress`` functions identically to that of
-   :meth:`AudioFile.convert`.
-   May raise :exc:`EndodingError` if some problem occurs during encoding.
-
-.. method:: WaveContainer.has_foreign_riff_chunks()
+.. method:: WaveContainer.has_foreign_wave_chunks()
 
    Returns ``True`` if our object has non-audio RIFF WAVE chunks.
+
+.. method:: WaveContainer.wave_header_footer()
+
+   Returns ``(header, footer)`` tuple of strings
+   where ``header`` is everything before the PCM data
+   and ``footer`` is everything after the PCM data.
+
+   May raise :exc:`ValueError` if there's a problem
+   with the header or footer data, such as invalid chunk IDs.
+   May raise :exc:`IOError` if there's a problem
+   reading the header or footer data from the file.
+
+.. classmethod:: WaveContainer.from_wave(filename, header, pcmreader, footer[, compression])
+
+   Encodes a new file from wave data.
+   ``header`` and ``footer`` are binary strings as returned by a
+   :meth:`WaveContainer.wave_header_footer` method,
+   ``pcmreader`` is a :class:`PCMReader` object
+   and ``compression`` is a binary string.
+
+   Returns a new :class:`AudioFile`-compatible object
+   or raises :exc:`EncodingError` if some error occurs when
+   encoding the file.
 
 AiffContainer Objects
 ^^^^^^^^^^^^^^^^^^^^^
@@ -560,32 +705,37 @@ This is accomplished by implementing three additional methods.
 
 .. class:: AiffContainer
 
-.. method:: AiffContainer.to_aiff(aiff_filename[, progress])
-
-   Creates an AIFF file with the given filename string
-   from our data, with any stored chunks intact.
-   ``progress``, if given, functions identically to the
-   :meth:`AudioFile.convert` method.
-   May raise :exc:`EndodingError` if some problem occurs during encoding.
-
-.. classmethod:: AiffContainer.from_aiff(filename, aiff_filename[, compression[, progress]])
-
-   Like :meth:`AudioFile.from_pcm`, creates a file with our class
-   at the given ``filename`` string, from the given ``aiff_filename``
-   string and returns a new object of our class.
-   ``compression`` is an optional compression level string
-   and ``progress`` functions identically to that of
-   :meth:`AudioFile.convert`.
-   May raise :exc:`EndodingError` if some problem occurs during encoding.
-
 .. method:: AiffContainer.has_foreign_aiff_chunks()
 
    Returns ``True`` if our object has non-audio AIFF chunks.
 
+.. method:: AiffContainer.aiff_header_footer()
+
+   Returns ``(header, footer)`` tuple of strings
+   where ``header`` is everything before the PCM data
+   and ``footer`` is everything after the PCM data.
+
+   May raise :exc:`ValueError` if there's a problem
+   with the header or footer data, such as invalid chunk IDs.
+   May raise :exc:`IOError` if there's a problem
+   reading the header or footer data from the file.
+
+.. classmethod:: AiffContainer.from_aiff(filename, header, pcmreader, footer[, compression])
+
+   Encodes a new file from wave data.
+   ``header`` and ``footer`` are binary strings as returned by a
+   :meth:`AiffContainer.aiff_header_footer` method,
+   ``pcmreader`` is a :class:`PCMReader` object
+   and ``compression`` is a binary string.
+
+   Returns a new :class:`AudioFile`-compatible object
+   or raises :exc:`EncodingError` if some error occurs when
+   encoding the file.
+
 MetaData Objects
 ----------------
 
-.. class:: MetaData([track_name[, track_number[, track_total[, album_name[, artist_name[, performer_name[, composer_name[, conductor_name[, media[, ISRC[, catalog[, copyright[, publisher[, year[, data[, album_number[, album_total[, comment[, images]]]]]]]]]]]]]]]]]]])
+.. class:: MetaData([track_name][, track_number][, track_total][, album_name][, artist_name][, performer_name][, composer_name][, conductor_name][, media][, ISRC][, catalog][, copyright][, publisher][, year][, data][, album_number][, album_total][, comment][, images])
 
    The :class:`MetaData` class represents an :class:`AudioFile`'s
    non-technical metadata.
@@ -602,6 +752,43 @@ MetaData Objects
 
    The ``images`` argument, if given, should be an iterable collection
    of :class:`Image`-compatible objects.
+
+   MetaData attributes may be ``None``,
+   which indicates the low-level implementation has
+   no corresponding entry.
+   For instance, ID3v2.3 tags use the ``"TALB"`` frame
+   to indicate the track's album name.
+   If that frame is present, an :class:`audiotools.ID3v23Comment`
+   MetaData object will have an ``album_name`` field containing
+   a Unicode string of its value.
+   If that frame is not present in the ID3v2.3 tag,
+   its ``album_name`` field will be ``None``.
+
+   For example, to access a track's album name field:
+
+   >>> metadata = track.get_metadata()
+   >>> metadata.album_name
+   u"Album Name"
+
+   To change a track's album name field:
+
+   >>> metadata = track.get_metadata()
+   >>> metadata.album_name = u"Updated Album Name"
+   >>> track.update_metadata(metadata)  # because metadata comes from track's get_metadata() method, one can use update_metadata()
+
+   To delete a track's album name field:
+
+   >>> metadata = track.get_metadata()
+   >>> del(metadata.album_name)
+   >>> track.update_metadata(metadata)
+
+   Or to replace a track's entire set of metadata:
+
+   >>> metadata = MetaData(track_name=u"Track Name",
+   ...                     album_name=u"Updated Album Name",
+   ...                     track_number=1,
+   ...                     track_total=3)
+   >>> track.set_metadata(metadata)  # because metadata is built from scratch, one must use set_metadata()
 
 .. data:: MetaData.track_name
 
@@ -669,6 +856,20 @@ MetaData Objects
 
    This track's comment as a Unicode string.
 
+.. method:: MetaData.fields()
+
+   Yields an ``(attr, value)`` tuple per :class:`MetaData` field.
+
+.. method:: MetaData.filled_fields()
+
+   Yields an ``(attr, value)`` tuple per non-blank :class:`MetaData` field.
+   Non-blank fields are those with a value other than ``None``.
+
+.. method:: MetaData.empty_fields()
+
+   Yields an ``(attr, value)`` tuple per blank :class:`MetaData` field.
+   Blank fields are those with a value of ``None``.
+
 .. classmethod:: MetaData.converted(metadata)
 
    Takes a :class:`MetaData`-compatible object (or ``None``)
@@ -735,10 +936,26 @@ MetaData Objects
    Takes an :class:`Image` from this class, as returned by :meth:`images`,
    and removes it from this metadata's list of images.
 
-.. method:: MetaData.merge(new_metadata)
+.. method:: MetaData.clean(fixes_performed)
 
-   Updates this metadata by replacing empty fields with those
-   from ``new_metadata``.  Non-empty fields are left as-is.
+   Returns a new :class:`MetaData` object of the same class
+   that's been cleaned of known problems including, but not limited to
+
+   * Leading whitespace in text fields
+   * Trailing whitespace in text fields
+   * Empty fields
+   * Leading zeroes in numerical fields
+   * Incorrectly labeled image metadata fields
+
+   ``fixes_performed`` is a list object with an append method.
+   Text descriptions of the fixes performed are appended
+   to that list as Unicode strings.
+
+.. method:: MetaData.raw_info()
+
+   Returns a Unicode string of raw metadata information
+   with as little filtering as possible.
+   This is meant to be useful for debugging purposes.
 
 AlbumMetaData Objects
 ---------------------
@@ -754,111 +971,6 @@ AlbumMetaData Objects
 
    Returns a single :class:`MetaData` object containing all the
    fields that are consistent across this object's collection of MetaData.
-
-AlbumMetaDataFile Objects
--------------------------
-
-.. class:: AlbumMetaDataFile(album_name, artist_name, year, catalog, extra, track_metadata)
-
-   This is an abstract parent class to :class:`audiotools.XMCD` and
-   :class:`audiotools.MusicBrainzReleaseXML`.
-   It represents a collection of album metadata as generated
-   by the FreeDB or MusicBrainz services.
-   Modifying fields within an :class:`AlbumMetaDataFile`-compatible
-   object will modify its underlying representation and those
-   changes will be present when :meth:`to_string` is called
-   on the updated object.
-   Note that :class:`audiotools.XMCD` doesn't support the `catalog`
-   field while :class:`audiotools.MusicBrainzReleaseXML` doesn't
-   support the `extra` fields.
-
-.. data:: AlbumMetaDataFile.album_name
-
-   The album's name as a Unicode string.
-
-.. data:: AlbumMetaDataFile.artist_name
-
-   The album's artist's name as a Unicode string.
-
-.. data:: AlbumMetaDataFile.year
-
-   The album's release year as a Unicode string.
-
-.. data:: AlbumMetaDataFile.catalog
-
-   The album's catalog number as a Unicode string.
-
-.. data:: AlbumMetaDataFile.extra
-
-   The album's extra information as a Unicode string.
-
-.. method:: AlbumMetaDataFile.__len__()
-
-   The total number of tracks on the album.
-
-.. method:: AlbumMetaDataFile.to_string()
-
-   Returns the on-disk representation of the file as a binary string.
-
-.. classmethod:: AlbumMetaDataFile.from_string(string)
-
-   Given a binary string, returns an :class:`AlbumMetaDataFile` object
-   of the same class.
-   Raises :exc:`MetaDataFileException` if a parsing error occurs.
-
-.. method:: AlbumMetaDataFile.get_track(index)
-
-   Given a track index (starting from 0), returns a
-   (`track_name`, `track_artist`, `track_extra`) tuple of Unicode strings.
-   Raises :exc:`IndexError` if the requested track is out-of-bounds.
-
-.. method:: AlbumMetaDataFile.set_track(index, track_name, track_artist, track_extra)
-
-   Given a track index (starting from 0) and a set of Unicode strings,
-   sets the appropriate track information.
-   Raises :exc:`IndexError` if the requested track is out-of-bounds.
-
-.. classmethod:: AlbumMetaDataFile.from_tracks(tracks)
-
-   Given a set of :class:`AudioFile` objects, returns an
-   :class:`AlbumMetaDataFile` object of the same class.
-   All files are presumed to be from the same album.
-
-.. classmethod:: AlbumMetaDataFile.from_cuesheet(cuesheet, total_frames, sample_rate[, metadata])
-
-   Given a Cuesheet-compatible object with :meth:`catalog`,
-   :meth:`IRSCs`, :meth:`indexes` and :meth:`pcm_lengths` methods;
-   `total_frames` and `sample_rate` integers; and an optional
-   :class:`MetaData` object of the entire album's metadata,
-   returns an :class:`AlbumMetaDataFile` object of the same class
-   constructed from that data.
-
-.. method:: AlbumMetaDataFile.track_metadata(track_number)
-
-   Given a `track_number` (starting from 1), returns a
-   :class:`MetaData` object of that track's metadata.
-
-   Raises :exc:`IndexError` if the track is out-of-bounds.
-
-.. method:: AlbumMetaDataFile.get(track_number, default)
-
-   Given a `track_number` (starting from 1), returns a
-   :class:`MetaData` object of that track's metadata,
-   or returns `default` if that track is not present.
-
-.. method:: AlbumMetaDataFile.track_metadatas()
-
-   Returns an iterator over all the :class:`MetaData` objects
-   in this file.
-
-.. method:: AlbumMetaDataFile.metadata()
-
-   Returns a single :class:`MetaData` object of all consistent fields
-   in this file.
-   For example, if `album_name` is the same in all MetaData objects,
-   the returned object will have that `album_name` value.
-   If `track_name` differs, the returned object have a blank
-   `track_name` field.
 
 
 Image Objects
@@ -930,12 +1042,6 @@ Image Objects
    Raises :exc:`InvalidImage` If unable to determine the
    image type from the data string.
 
-.. method:: Image.thumbnail(width, height, format)
-
-   Given width and height integers and a format string (such as ``"JPEG"``)
-   returns a new :class:`Image` object resized to those dimensions
-   while retaining its original aspect ratio.
-
 ReplayGain Objects
 ------------------
 
@@ -994,14 +1100,19 @@ PCMReader Objects
 
    The number of bits-per-sample in this audio stream as a positive integer.
 
-.. method:: PCMReader.read(bytes)
+.. method:: PCMReader.read(pcm_frames)
 
-   Try to read a :class:`pcm.FrameList` object of size ``bytes``, if possible.
-   This method is *not* guaranteed to read that amount of bytes.
+   Try to read a :class:`pcm.FrameList` object with the given
+   number of PCM frames, if possible.
+   This method is *not* guaranteed to read that amount of frames.
    It may return less, particularly at the end of an audio stream.
    It may even return FrameLists larger than requested.
    However, it must always return a non-empty FrameList until the
    end of the PCM stream is reached.
+
+   Once the end of the stream is reached, subsequent calls
+   will return empty FrameLists.
+
    May raise :exc:`IOError` if there is a problem reading the
    source file, or :exc:`ValueError` if the source file has
    some sort of error.
@@ -1011,6 +1122,10 @@ PCMReader Objects
    Closes the audio stream.
    If any subprocesses were used for audio decoding, they will also be
    closed and waited for their process to finish.
+
+   Subsequent calls to :meth:`PCMReader.read` will
+   raise :exc:`ValueError` exceptions once the stream is closed.
+
    May raise a :exc:`DecodingError`, typically indicating that
    a helper subprocess used for decoding has exited with an error.
 
@@ -1071,6 +1186,19 @@ PCMConverter Objects
 
    This method functions the same as the :meth:`PCMReader.close` method.
 
+RemaskedPCMReader Objects
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. class:: RemaskedPCMReader(pcmreader, channel_count, channel_mask)
+
+   This class wraps around an existing :class:`PCMReader` object
+   and constructs a new :class:`PCMReader` with the given
+   channel count and mask.
+
+   Channels common to ``pcmreader`` and the given channel mask
+   are output by calls to :meth:`RemaskedPCMReader.read`
+   while missing channels are populated with silence.
+
 BufferedPCMReader Objects
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -1079,7 +1207,7 @@ BufferedPCMReader Objects
    This class wraps around an existing :class:`PCMReader` object.
    Its calls to :meth:`read` are guaranteed to return
    :class:`pcm.FrameList` objects as close to the requested amount
-   of bytes as possible without going over by buffering data
+   of PCM frames as possible without going over by buffering data
    internally.
 
    The reason such behavior is not required is that we often
@@ -1087,6 +1215,23 @@ BufferedPCMReader Objects
    passed from one routine to another.
    But on occasions when we need :class:`pcm.FrameList` objects
    to be of a particular size, this class can accomplish that.
+
+CounterPCMReader Objects
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. class:: CounterPCMReader(pcmreader)
+
+   This class wraps around an existing :class:`PCMReader` object
+   and keeps track of the number of bytes and frames written
+   upon each call to ``read``.
+
+.. attribute:: CounterPCMReader.frames_written
+
+   The number of PCM frames written thus far.
+
+.. method:: CounterPCMReader.bytes_written()
+
+   The number of bytes written thus far.
 
 ReorderedPCMReader Objects
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1111,16 +1256,12 @@ PCMCat Objects
 
 .. class:: PCMCat(pcmreaders)
 
-   This class wraps around an iterable group of :class:`PCMReader` objects
+   This class wraps around a list of :class:`PCMReader` objects
    and concatenates their output into a single output stream.
 
-.. warning::
-
-   :class:`PCMCat` does not check that its input :class:`PCMReader` objects
-   all have the same sample rate, channels, channel mask or bits-per-sample.
-   Mixing incompatible readers is likely to trigger undesirable behavior
-   from any sort of processing - which often assumes data will be in a
-   consistent format.
+   If any of the readers has different attributes
+   from the first reader in the stream, :exc:`ValueError` is raised
+   at init-time.
 
 PCMReaderWindow Objects
 ^^^^^^^^^^^^^^^^^^^^^^^
@@ -1151,7 +1292,7 @@ LimitedPCMReader Objects
 
 .. note::
 
-   :class:`PCMReaderWindow` is designed primarly for handling
+   :class:`PCMReaderWindow` is designed primarily for handling
    sample offset values in a :class:`CDTrackReader`,
    or for skipping a potentially large number of samples
    in a stream.
@@ -1331,6 +1472,39 @@ CDDA Objects
 
    The position of the last sector on the CD.
 
+.. method:: CDDA.freedb_disc_id()
+
+   A :class:`freedb.DiscID` object from this CD's table-of-contents.
+
+.. method:: CDDA.musicbrainz_disc_id()
+
+   A :class:`musicbrainz.DiscID` object from this CD's table-of-contents.
+
+.. method:: CDDA.metadata_lookup([musicbrainz_server], [musicbrainz_port], [freedb_server], [freedb_port], [use_musicbrainz], [use_freedb])
+
+   Calls :func:`metadata_lookup` using this CD's table-of-contents.
+
+CD Lookups
+^^^^^^^^^^
+
+.. function:: metadata_lookup(first_track_number, last_track_number, offsets, lead_out_offset, total_length, [musicbrainz_server], [musicbrainz_port], [freedb_server], [freedb_port], [use_musicbrainz], [use_freedb])
+
+   Generates a set of :class:`MetaData` objects from CD information.
+   ``first_track_number`` and ``last_track_number`` are positive ints.
+   ``offsets`` is a list of track offsets, in CD frames.
+   ``lead_out_offset`` is the offset of the "lead-out" track, in CD frames.
+   ``total_length`` is the total length of the disc, in CD frames.
+
+   Returns a ``metadata[c][t]`` list of lists
+   where ``c`` is a possible choice and ``t`` is the :class:`MetaData`
+   for a given track (starting from 0).
+
+   This will always return a list of :class:`MetaData` objects
+   for at least one choice.
+   In the event that no matches for the CD can be found,
+   those objects will only contain ``track_number`` and ``track_total``
+   fields.
+
 CDTrackReader Objects
 ^^^^^^^^^^^^^^^^^^^^^
 
@@ -1374,9 +1548,10 @@ DVDAudio Objects
 
    This class is used to access a DVD-Audio.
    It contains a collection of titlesets.
-   Each titleset contains a list of :class:`DVDATitle` objects,
-   and each :class:`DVDATitle` contains a list of
-   :class:`DVDATrack` objects.
+   Each titleset contains a list of
+   :class:`audiotools.dvda.DVDATitle` objects,
+   and each :class:`audiotools.dvda.DVDATitle` contains a list of
+   :class:`audiotools.dvda.DVDATrack` objects.
    ``audio_ts_path`` is the path to the DVD-Audio's
    ``AUDIO_TS`` directory, such as ``/media/cdrom/AUDIO_TS``.
    ``device`` is the path to the DVD-Audio's mount device,
@@ -1394,152 +1569,6 @@ DVDAudio Objects
    contains a ``DVDAUDIO.MKB`` file, unprotection will be
    performed automatically if supported on the user's platform.
    Otherwise, the files are assumed to be unprotected.
-
-DVDATitle Objects
-^^^^^^^^^^^^^^^^^
-
-.. class:: DVDATitle(dvdaudio, titleset, title, pts_length, tracks)
-
-   This class represents a single DVD-Audio title.
-   ``dvdaudio`` is a :class:`DVDAudio` object.
-   ``titleset`` and ``title`` are integers indicating
-   this title's position in the DVD-Audio - both offset from 0.
-   ``pts_length`` is the the total length of the title in
-   PTS ticks (there are 90000 PTS ticks per second).
-   ``tracks`` is a list of :class:`DVDATrack` objects.
-
-   It is rarely instantiated directly; one usually
-   retrieves titles from the parent :class:`DVDAudio` object.
-
-.. data:: DVDATitle.dvdaudio
-
-   The parent :class:`DVDAudio` object.
-
-.. data:: DVDATitle.titleset
-
-   An integer of this title's titleset, offset from 0.
-
-.. data:: DVDATitle.title
-
-   An integer of this title's position within the titleset, offset from 0.
-
-.. data:: DVDATitle.pts_length
-
-   The length of this title in PTS ticks.
-
-.. data:: DVDATitle.tracks
-
-   A list of :class:`DVDATrack` objects.
-
-.. method:: DVDATitle.info()
-
-   Returns a (``sample_rate``, ``channels``, ``channel_mask``,
-   ``bits_per_sample``, ``type``) tuple of integers.
-   ``type`` is ``0xA0`` if the title is a PCM stream,
-   or ``0xA1`` if the title is an MLP stream.
-
-.. method:: DVDATitle.stream()
-
-   Returns an :class:`AOBStream` object of this title's data.
-
-.. method:: DVDATitle.to_pcm()
-
-   Returns a :class:`PCMReader`-compatible object of this title's
-   entire data stream.
-
-DVDATrack Objects
-^^^^^^^^^^^^^^^^^
-
-.. class:: DVDATrack(dvdaudio, titleset, title, track, first_pts, pts_length, first_sector, last_sector)
-
-   This class represents a single DVD-Audio track.
-   ``dvdaudio`` is a :class:`DVDAudio` object.
-   ``titleset``, ``title`` and ``track`` are integers indicating
-   this track's position in the DVD-Audio - all offset from 0.
-   ``first_pts`` is the track's first PTS value.
-   ``pts_length`` is the the total length of the track in PTS ticks.
-   ``first_sector`` and ``last_sector`` indicate the range of
-   sectors this track occupies.
-
-   It is also rarely instantiated directly;
-   one usually retrieves tracks from the parent
-   :class:`DVDATitle` object.
-
-.. data:: DVDATrack.dvdaudio
-
-   The parent :class:`DVDAudio` object.
-
-.. data:: DVDATrack.titleset
-
-   An integer of this tracks's titleset, offset from 0.
-
-.. data:: DVDATrack.title
-
-   An integer of this track's position within the titleset, offset from 0.
-
-.. data:: DVDATrack.track
-
-   An integer of this track's position within the title, offset from 0.
-
-.. data:: DVDATrack.first_pts
-
-   The track's first PTS index.
-
-.. data:: DVDATrack.pts_length
-
-   The length of this track in PTS ticks.
-
-.. data:: DVDATrack.first_sector
-
-   The first sector this track occupies.
-
-.. warning::
-
-   The track is *not* guaranteed to start at the beginning of
-   its first sector.
-   Although it begins within that sector, the track's start may be
-   offset some arbitrary number of bytes from the sector's start.
-
-.. data:: DVDATrack.last_sector
-
-   The last sector this track occupies.
-
-AOBStream Objects
-^^^^^^^^^^^^^^^^^
-
-.. class:: AOBStream(aob_files, first_sector, last_sector[, unprotector])
-
-   This is a stream of DVD-Audio AOB data.
-   It contains several convenience methods to make
-   unpacking that data easier.
-   ``aob_files`` is a list of complete AOB file path strings.
-   ``first_sector`` and ``last_sector`` are integers
-   indicating the stream's range of sectors.
-   ``unprotector`` is a function which takes a string
-   of binary sector data and returns an unprotected binary string.
-
-.. method:: AOBStream.sectors()
-
-   Iterates over a series of 2048 byte, binary strings of sector data
-   for the entire AOB stream.
-   If ``unprotector`` is present, those sectors are returned unprotected.
-
-.. method:: AOBStream.packets()
-
-   Iterates over a series of packets by wrapping around the sectors
-   iterator.
-   Each sector contains one or more packets.
-   Packets containing audio data (that is, those with a stream ID
-   of ``0xBD``) are returned while non-audio packets are discarded.
-
-.. method:: AOBStream.packet_payloads()
-
-   Iterates over a series of packet data by wrapping around the
-   packets iterator.
-   The payload is the packet with its ID, CRC and padding removed.
-   Concatenating all of a stream's payloads results
-   in a complete MLP or PCM stream suitable for passing to
-   a decoder.
 
 ExecQueue Objects
 -----------------
@@ -1595,10 +1624,12 @@ ExecQueue Objects
 ExecProgressQueue Objects
 -------------------------
 
-.. class:: ExecProgressQueue(progress_display)
+.. class:: ExecProgressQueue(progress_display[, total_progress_message])
 
    This class runs multiple jobs in parallel and displays their
    progress output to the given :class:`ProgressDisplay` object.
+   The optional ``total_progress_message`` argument is a Unicode string
+   which displays an additional progress bar of the queue's total progress.
 
 .. attribute:: ExecProgressQueue.results
 
@@ -1625,14 +1656,15 @@ ExecProgressQueue Objects
    The executed function can then call that ``progress`` function
    at regular intervals to indicate its progress.
 
-   If given, ``progress_text`` is a unicode string to be displayed
+   If given, ``progress_text`` is a Unicode string to be displayed
    while the function is being executed.
 
    ``completion_output`` is displayed once the executed function is
    completed.
-   It can be either a unicode string or a function whose argument
+   It can be either a Unicode string or a function whose argument
    is the returned result of the executed function and which must
-   output a unicode string.
+   output either a Unicode string or ``None``.
+   If ``None``, no output text is generated for the completed job.
 
 .. method:: ExecProgressQueue.run([max_processes])
 
@@ -1756,10 +1788,6 @@ Messenger Objects
 
    >>> m.usage(u"<arg1> <arg2> <arg3>")
    *** Usage: audiotools <arg1> <arg2> <arg3>
-
-.. method:: Messenger.filename(string)
-
-   Takes a raw filename string and converts it to a Unicode string.
 
 .. method:: Messenger.new_row()
 
@@ -1894,7 +1922,7 @@ Messenger Objects
 .. method:: Messenger.ansi_cleardown(self)
 
    Clears all the output below the current line.
-   This is typically used in conjuction with :meth:`Messenger.ansi_uplines`.
+   This is typically used in conjunction with :meth:`Messenger.ansi_uplines`.
 
    >>> msg = Messenger("audiotools", None)
    >>> msg.output(u"line 1")
@@ -1931,7 +1959,7 @@ ProgressDisplay Objects
 
    Adds a row of output to be displayed with progress indicated.
    ``row_id`` should be a unique identifier, typically an int.
-   ``output_line`` should be a unicode string indicating what
+   ``output_line`` should be a Unicode string indicating what
    we're displaying the progress of.
 
 .. method:: ProgressDisplay.update_row(row_id, current, total)
@@ -1963,7 +1991,7 @@ ProgressDisplay Objects
 
    This is a subclass of :class:`ProgressDisplay` used
    for generating only a single line of progress output.
-   As such, one only specifies a single row of unicode ``progress_text``
+   As such, one only specifies a single row of Unicode ``progress_text``
    at initialization time and can avoid the row management functions
    entirely.
 
@@ -2010,7 +2038,7 @@ ProgressDisplay Objects
 
    This is used by :class:`ProgressDisplay` and its subclasses
    for actual output generation.
-   ``row_id`` is a unique identifier and ``output_line`` is a unicode string.
+   ``row_id`` is a unique identifier and ``output_line`` is a Unicode string.
    It is not typically instantiated directly.
 
 .. method:: ProgressRow.update(current, total)
@@ -2019,7 +2047,7 @@ ProgressDisplay Objects
 
 .. method:: ProgressRow.unicode(width)
 
-   Returns the output line and its current progress as a unicode string,
+   Returns the output line and its current progress as a Unicode string,
    formatted to the given width in onscreen characters.
    Screen width can be determined from the :meth:`Messenger.terminal_size`
    method.
@@ -2027,11 +2055,11 @@ ProgressDisplay Objects
 display_unicode Objects
 ^^^^^^^^^^^^^^^^^^^^^^^
 
-This class is for displaying portions of a unicode string to
+This class is for displaying portions of a Unicode string to
 the screen.
 The reason this is needed is because not all Unicode characters
 are the same width.
-So, for example, if one wishes to display a portion of a unicode string to
+So, for example, if one wishes to display a portion of a Unicode string to
 a screen that's 80 ASCII characters wide, one can't simply perform:
 
 >>> messenger.output(unicode_string[0:80])
@@ -2081,3 +2109,95 @@ which would cause the string to wrap.
    u'\u30a1\u30a2\u30a3\u30a4\u30a5\u30a6\u30a7\u30a8\u30a9\u30aa\u30ab\u30ac\u30ad\u30ae\u30af\u30b0\u30b1\u30b2\u30b3\u30b4'
    >>> print repr(unicode(tail))
    u'\u30b5\u30b6\u30b7\u30b8\u30b9'
+
+Exceptions
+----------
+
+.. exception:: UnknownAudioType
+
+   Raised by :func:`filename_to_type` if the file's suffix is unknown.
+
+.. exception:: AmbiguousAudioType
+
+   Raised by :func:`filename_to_type` if the file's suffix
+   applies to more than one audio class.
+
+.. exception:: DecodingError
+
+   Raised by :class:`PCMReader`'s .close() method if
+   a helper subprocess exits with an error,
+   typically indicating a problem decoding the file.
+
+.. exception:: DuplicateFile
+
+   Raised by :func:`open_files` if the same file
+   is included more than once and ``no_duplicates`` is indicated.
+
+.. exception:: DuplicateOutputFile
+
+   Raised by :func:`audiotools.ui.process_output_options`
+   if the same output file is generated more than once.
+
+.. exception:: EncodingError
+
+   Raised by :meth:`AudioFile.from_pcm` and :meth:`AudioFile.convert`
+   if an error occurs when encoding an input file.
+   This includes errors from the input stream,
+   a problem writing the output file in the given location,
+   or EncodingError subclasses such as
+   :exc:`UnsupportedBitsPerSample` if the input stream
+   is formatted in a way the output class does not support.
+
+.. exception:: InvalidFile
+
+   Raised by :meth:`AudioFile.__init__` if the file
+   is invalid in some way.
+
+.. exception:: InvalidFilenameFormat
+
+   Raised by :meth:`AudioFile.track_name` if the format string
+   contains broken fields.
+
+.. exception:: InvalidImage
+
+   Raised by :meth:`Image.new` if the image cannot be parsed correctly.
+
+.. exception:: OutputFileIsInput
+
+   Raised by :func:`process_output_options` if an output file
+   is the same as any of the input files.
+
+.. exception:: SheetException
+
+   A parent exception of :exc:`audiotools.cue.CueException`
+   and :exc:`audiotools.toc.TOCException`,
+   to be raised by :func:`read_sheet` if a .toc or .cue file
+   is unable to be parsed correctly.
+
+.. exception:: UnsupportedBitsPerSample
+
+   Subclass of :exc:`EncodingError`, indicating
+   the input stream's bits-per-sample is not supported
+   by the output class.
+
+.. exception:: UnsupportedChannelCount
+
+   Subclass of :exc:`EncodingError`, indicating
+   the input stream's channel count is not supported
+   by the output class.
+
+.. exception:: UnsupportedChannelMask
+
+   Subclass of :exc:`EncodingError`, indicating
+   the input stream's channel mask is not supported
+   by the output class.
+
+.. exception:: UnsupportedFile
+
+   Raised by :func:`open` if the given file is not something
+   identifiable, or we do not have the installed binaries to support.
+
+.. exception:: UnsupportedTracknameField
+
+   Raised by :meth:`AudioFile.track_name` if a track name
+   field is not supported.

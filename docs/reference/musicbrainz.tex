@@ -27,7 +27,7 @@ a CD's disc ID, submits it to MusicBrainz via an HTTP get query
 and receives information such as album name, artist name, track names
 and so forth as an XML file.
 
-\pagebreak
+\clearpage
 
 \subsection{the Disc ID}
 Calculating a MusicBrainz disc ID requires knowing a CD's first track number,
@@ -63,7 +63,7 @@ and the lead out track offset becomes \texttt{0000F6C1}.
 
 These individual strings are then combined into a single 804 byte string:
 \begin{figure}[h]
-\includegraphics{figures/musicbrainz_discid.pdf}
+\includegraphics{figures/musicbrainz/discid.pdf}
 \end{figure}
 
 Excess track offsets are treated as having an offset value of 0,
@@ -86,7 +86,7 @@ make the value better suited to HTTP requests.
 So to complete our example, the hash value becomes a disc ID of
 \texttt{2j2TBGJ3PdV7vkO1Na1qRXE48Hk-}
 
-\pagebreak
+\clearpage
 
 \subsection{Server Query}
 MusicBrainz runs as a service on HTTP port 80.
@@ -114,7 +114,7 @@ an XML file will always be generated.
 
 \subsection{Release XML}
 \begin{wrapfigure}[21]{r}{1.94in}
-\includegraphics{figures/musicbrainz_xml.pdf}
+\includegraphics{figures/musicbrainz/xml.pdf}
 \end{wrapfigure}
 All XML files returned by a MusicBrainz query consist of a
 \texttt{<metadata>}
@@ -167,4 +167,3 @@ tags all contain an `id' attribute with 32 hex digits in the format
 `12345678-9abc-def1-2345-6789abcdef1234'.
 These uniquely identify the Release, Artist and Track information
 in the MusicBrainz database and can be used for direct lookups.
-

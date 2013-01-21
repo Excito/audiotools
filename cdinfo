@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 #Audio Tools, a module and set of tools for manipulating audio data
-#Copyright (C) 2007-2011  Brian Langenberger
+#Copyright (C) 2007-2012  Brian Langenberger
 
 #This program is free software; you can redistribute it and/or modify
 #it under the terms of the GNU General Public License as published by
@@ -19,15 +19,14 @@
 
 
 import os.path
-import audiotools
 import sys
-import gettext
+import audiotools
+import audiotools.text as _
 
-gettext.install("audiotools", unicode=True)
 
 if (__name__ == '__main__'):
     parser = audiotools.OptionParser(
-        usage=_(u"%prog [options]"),
+        usage=_.USAGE_CDINFO,
         version="Python Audio Tools %s" % (audiotools.VERSION))
 
     parser.add_option('-c', '--cdrom', action='store',
@@ -35,7 +34,7 @@ if (__name__ == '__main__'):
                       default=audiotools.DEFAULT_CDROM)
 
     (options, args) = parser.parse_args()
-    msg = audiotools.Messenger("cd2xmcd", options)
+    msg = audiotools.Messenger("cd2info", options)
 
     try:
         cdda = audiotools.CDDA(options.cdrom, perform_logging=False)
@@ -44,64 +43,69 @@ if (__name__ == '__main__'):
         sys.exit(1)
 
     if (len(cdda) == 255):
-        msg.error(_(u"No CD in drive"))
+        msg.error(_.ERR_NO_CDDA)
         sys.exit(1)
     elif (len(cdda) < 1):
-        msg.error(_(u"No audio tracks found on CD"))
+        msg.error(_.ERR_NO_EMPTY_CDDA)
         sys.exit(1)
 
     tracks = list(cdda)
 
     msg.new_row()
-    msg.output_column(_(u"Total Tracks"), True)
-    msg.output_column(_(u" : "))
+    msg.output_column(_.LAB_TOTAL_TRACKS, True)
+    msg.output_column(u" : ")
     msg.output_column(unicode(len(cdda)))
 
     msg.new_row()
-    msg.output_column(_(u"Total Length"), True)
-    msg.output_column(_(u" : "))
-    msg.output_column(_(u"%2d:%2.2d (%d frames)" % (cdda.length() / 75 / 60,
-                                                    cdda.length() / 75 % 60,
-                                                    cdda.length())))
+    msg.output_column(_.LAB_TOTAL_LENGTH, True)
+    msg.output_column(u" : ")
+    msg.output_column(
+        _.LAB_TRACK_LENGTH_FRAMES % (cdda.length() / 75 / 60,
+                                     cdda.length() / 75 % 60,
+                                     cdda.length()))
 
     msg.new_row()
-    msg.output_column(_(u"FreeDB disc ID"), True)
-    msg.output_column(_(u" : "))
-    msg.output_column(unicode(str(audiotools.DiscID.from_cdda(cdda))))
+    msg.output_column(_.LAB_FREEDB_ID, True)
+    msg.output_column(u" : ")
+    msg.output_column(str(cdda.freedb_disc_id()).decode('ascii'))
 
     msg.new_row()
-    msg.output_column(_(u"MusicBrainz disc ID"), True)
-    msg.output_column(_(u" : "))
+    msg.output_column(_.LAB_MUSICBRAINZ_ID, True)
+    msg.output_column(u" : ")
 
-    msg.output_column(unicode(str(audiotools.MBDiscID.from_cdda(cdda))))
+    msg.output_column(str(cdda.musicbrainz_disc_id()).decode('ascii'))
 
     msg.blank_row()
     msg.output_rows()
 
     msg.new_row()
-    msg.output_column(_(u"#"), True)
+    msg.output_column(u"#", True)
     msg.output_column(u" ")
-    msg.output_column(_(u"Length"))
+    msg.output_column(_.LAB_CDINFO_LENGTH)
     msg.output_column(u" ")
-    msg.output_column(_(u"Frames"))
+    msg.output_column(_.LAB_CDINFO_FRAMES)
     msg.output_column(u" ")
-    msg.output_column(_(u"Offset"))
+    msg.output_column(_.LAB_CDINFO_OFFSET)
 
     msg.new_row()
-    msg.output_column(_(u"--"))
+    msg.output_column(u"--")
     msg.output_column(u" ")
-    msg.output_column(_(u"------"))
+    msg.output_column(
+        u"-" * len(audiotools.display_unicode(_.LAB_CDINFO_LENGTH)))
     msg.output_column(u" ")
-    msg.output_column(_(u"------"))
+    msg.output_column(
+        u"-" * len(audiotools.display_unicode(_.LAB_CDINFO_FRAMES)))
     msg.output_column(u" ")
-    msg.output_column(_(u"------"))
+    msg.output_column(
+        u"-" * len(audiotools.display_unicode(_.LAB_CDINFO_OFFSET)))
 
     for track in tracks:
         msg.new_row()
         msg.output_column(unicode(track.track_number), True)
         msg.output_column(u" ")
-        msg.output_column(u"%d:%2.2d" % (track.length() / 75 / 60,
-                                         track.length() / 75 % 60), True)
+        msg.output_column(
+            _.LAB_TRACK_LENGTH % (track.length() / 75 / 60,
+                                  track.length() / 75 % 60), True)
         msg.output_column(u" ")
         msg.output_column(unicode(track.length()))
         msg.output_column(u" ")

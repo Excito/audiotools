@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 #Audio Tools, a module and set of tools for manipulating audio data
-#Copyright (C) 2007-2011  Brian Langenberger
+#Copyright (C) 2007-2012  Brian Langenberger
 
 #This program is free software; you can redistribute it and/or modify
 #it under the terms of the GNU General Public License as published by
@@ -19,165 +19,180 @@
 
 
 import sys
-import audiotools
 import os.path
-import gettext
-
-gettext.install("audiotools", unicode=True)
-
-
-#--replace-metadata, no XMCD file given
-#completely wipe out existing metadata
-#and replace with tags given on command-line
-def blank_metadata(track, xmcd):
-    return audiotools.MetaData()
+import audiotools
+import audiotools.ui
+import audiotools.text as _
+import termios
 
 
-#no --replace-metadata, no XMCD file given
-#use metadata from existing tracks as base
-#and merge with tags given on command-line
-def track_metadata(track, xmcd):
-    return track.get_metadata()
+if (audiotools.ui.AVAILABLE):
+    urwid_present = True
+    urwid = audiotools.ui.urwid
+
+    class Tracktag(urwid.Frame):
+        def __init__(self, tracks, metadata_choices, final_album=True):
+            self.__cancelled__ = True
+            status = urwid.Text(u"")
+
+            buttons = urwid.Filler(
+                urwid.Columns(
+                    widget_list=[('weight', 1,
+                                  urwid.Button(_.LAB_CANCEL_BUTTON,
+                                               on_press=self.exit)),
+                                 ('weight', 2,
+                                  urwid.Button(_.LAB_APPLY_BUTTON
+                                               if final_album
+                                               else _.LAB_TRACK2TRACK_NEXT,
+                                               on_press=self.apply))],
+                    dividechars=3,
+                    focus_column=1))
+
+            self.filler = audiotools.ui.MetaDataFiller(
+                [unicode(audiotools.Filename(t.filename).basename())
+                 for t in tracks],
+                metadata_choices,
+                status)
+
+            urwid.Frame.__init__(
+                self,
+                body=urwid.Pile([("weight", 1, self.filler),
+                                 ("fixed", 1, buttons)]),
+                footer=status)
+
+        def apply(self, button):
+            self.__cancelled__ = False
+            raise urwid.ExitMainLoop()
+
+        def exit(self, button):
+            self.__cancelled__ = True
+            raise urwid.ExitMainLoop()
+
+        def cancelled(self):
+            return self.__cancelled__
+
+        def handle_text(self, i):
+            if (i == 'esc'):
+                self.exit(None)
+            elif (i == 'f1'):
+                self.filler.selected_match.select_previous_item()
+            elif (i == 'f2'):
+                self.filler.selected_match.select_next_item()
+
+        def populated_metadata(self):
+            """yields a new, populated MetaData object per track
+            to be called once Urwid's main loop has completed"""
+
+            for (track_id, metadata) in self.filler.selected_match.metadata():
+                yield metadata
+
+else:
+    urwid_present = False
 
 
-#--replace-metadata, XMCD file given
-#completely wipe out existing metadata
-#and replace with command-line tags merged with XMCD metadata
-def xmcd_metadata(track, xmcd):
-    metadata = xmcd.get(track.track_number(), None)
-    if (metadata is not None):
-        return metadata
-    elif (len(xmcd) > 0):
-        return xmcd.metadata()
-    else:
-        return None
+UPDATE_OPTIONS = {"track_name": ("--name",
+                                 _.LAB_TRACKTAG_UPDATE_TRACK_NAME),
+                  "artist_name": ("--artist",
+                                  _.LAB_TRACKTAG_UPDATE_ARTIST_NAME),
+                  "performer_name": ("--performer",
+                                     _.LAB_TRACKTAG_UPDATE_PERFORMER_NAME),
+                  "composer_name": ("--composer",
+                                    _.LAB_TRACKTAG_UPDATE_COMPOSER_NAME),
+                  "conductor_name": ("--conductor",
+                                     _.LAB_TRACKTAG_UPDATE_CONDUCTOR_NAME),
+                  "album_name": ("--album",
+                                 _.LAB_TRACKTAG_UPDATE_ALBUM_NAME),
+                  "catalog": ("--catalog",
+                              _.LAB_TRACKTAG_UPDATE_CATALOG),
+                  "track_number": ("--number",
+                                   _.LAB_TRACKTAG_UPDATE_TRACK_NUMBER),
+                  "track_total": ("--track-total",
+                                  _.LAB_TRACKTAG_UPDATE_TRACK_TOTAL),
+                  "album_number": ("--album-number",
+                                   _.LAB_TRACKTAG_UPDATE_ALBUM_NUMBER),
+                  "album_total": ("--album-total",
+                                  _.LAB_TRACKTAG_UPDATE_ALBUM_TOTAL),
+                  "ISRC": ("--ISRC",
+                           _.LAB_TRACKTAG_UPDATE_ISRC),
+                  "publisher": ("--publisher",
+                                _.LAB_TRACKTAG_UPDATE_PUBLISHER),
+                  "media": ("--media-type",
+                            _.LAB_TRACKTAG_UPDATE_MEDIA),
+                  "year": ("--year",
+                           _.LAB_TRACKTAG_UPDATE_YEAR),
+                  "date": ("--date",
+                           _.LAB_TRACKTAG_UPDATE_DATE),
+                  "copyright": ("--copyright",
+                                _.LAB_TRACKTAG_UPDATE_COPYRIGHT),
+                  "comment": ("--comment",
+                              _.LAB_TRACKTAG_UPDATE_COMMENT)}
 
-
-#no --replace metadata, XMCD file given
-#replace with command-line tags merged with XMCD metadata
-#*and* existing metadata
-def xmcd_track_metadata(track, xmcd):
-    track_metadata = track.get_metadata()
-
-    if (track_metadata is not None):
-        xmcd_md = track_metadata.__class__.converted(
-            xmcd_metadata(track, xmcd))
-    elif (len(xmcd) > 0):
-        xmcd_md = xmcd.get(track.track_number(), None)
-        if (xmcd_md is None):
-            xmcd_md = xmcd.metadata()
-    else:
-        xmcd_md = None
-
-    if (xmcd_md is not None):
-        xmcd_md.merge(track_metadata)
-
-    return xmcd_md
-
-
-#--replace-metadata
-def replace_cuesheet(track, import_cuesheet):
-    return import_cuesheet
-
-
-#no --replace-metadata
-def noreplace_cuesheet(track, import_cuesheet):
-    if (import_cuesheet is None):
-        return track.get_cuesheet()
-    else:
-        return import_cuesheet
-
-
-#tries to return a populated Image object of the appropriate type
-#raises InvalidImage if something goes wrong during opening or parsing
-def get_raw_image(filename, type):
-    try:
-        f = open(filename, 'rb')
-        data = f.read()
-        f.close()
-
-        return audiotools.Image.new(data, u'', type)
-    except IOError:
-        raise audiotools.InvalidImage(_(u"Unable to open file"))
-
-
-def get_thumbnailed_image(filename, type):
-    image = get_raw_image(filename, type)
-    if ((image.width > audiotools.THUMBNAIL_SIZE) or
-        (image.height > audiotools.THUMBNAIL_SIZE)):
-        return image.thumbnail(audiotools.THUMBNAIL_SIZE,
-                               audiotools.THUMBNAIL_SIZE,
-                               audiotools.THUMBNAIL_FORMAT)
-    else:
-        return image
-
-
-#given a comment filename
-#returns the comment as a unicode string
-#or exits with an error if the file cannot be read
-#or is not UTF-8 text
-def read_comment(filename, messenger):
-    try:
-        f = open(filename, 'rb')
-        data = f.read().decode('utf-8', 'replace')
-        f.close()
-
-        if (((data.count(u"\uFFFD") * 100) / len(data)) >= 10):
-            messenger.error(
-                _(u"Comment file \"%s\" does not appear to be UTF-8 text") %
-                (messenger.filename(filename)))
-            sys.exit(1)
-        else:
-            return data
-    except IOError:
-        messenger.error(_(u"Unable to open comment file \"%s\"") % \
-                            (messenger.filename(filename)))
-        sys.exit(1)
-
+REMOVE_OPTIONS = {"track_name": ("--remove-name",
+                                 _.LAB_TRACKTAG_REMOVE_TRACK_NAME),
+                  "artist_name": ("--remove-artist",
+                                  _.LAB_TRACKTAG_REMOVE_ARTIST_NAME),
+                  "performer_name": ("--remove-performer",
+                                     _.LAB_TRACKTAG_REMOVE_PERFORMER_NAME),
+                  "composer_name": ("--remove-composer",
+                                    _.LAB_TRACKTAG_REMOVE_COMPOSER_NAME),
+                  "conductor_name": ("--remove-conductor",
+                                     _.LAB_TRACKTAG_REMOVE_CONDUCTOR_NAME),
+                  "album_name": ("--remove-album",
+                                 _.LAB_TRACKTAG_REMOVE_ALBUM_NAME),
+                  "catalog": ("--remove-catalog",
+                              _.LAB_TRACKTAG_REMOVE_CATALOG),
+                  "track_number": ("--remove-number",
+                                   _.LAB_TRACKTAG_REMOVE_TRACK_NUMBER),
+                  "track_total": ("--remove-track-total",
+                                  _.LAB_TRACKTAG_REMOVE_TRACK_TOTAL),
+                  "album_number": ("--remove-album-number",
+                                   _.LAB_TRACKTAG_REMOVE_ALBUM_NUMBER),
+                  "album_total": ("--remove-album-total",
+                                  _.LAB_TRACKTAG_REMOVE_ALBUM_TOTAL),
+                  "ISRC": ("--remove-ISRC",
+                           _.LAB_TRACKTAG_REMOVE_ISRC),
+                  "publisher": ("--remove-publisher",
+                                _.LAB_TRACKTAG_REMOVE_PUBLISHER),
+                  "media": ("--remove-media-type",
+                            _.LAB_TRACKTAG_REMOVE_MEDIA),
+                  "year": ("--remove-year",
+                           _.LAB_TRACKTAG_REMOVE_YEAR),
+                  "date": ("--remove-date",
+                           _.LAB_TRACKTAG_REMOVE_DATE),
+                  "copyright": ("--remove-copyright",
+                                _.LAB_TRACKTAG_REMOVE_COPYRIGHT),
+                  "comment": ("--remove-comment",
+                              _.LAB_TRACKTAG_REMOVE_COMMENT)}
 
 if (__name__ == '__main__'):
+    #add an enormous number of options to the parser
+    #neatly categorized for convenience
     parser = audiotools.OptionParser(
-        usage=_(u"%prog [options] [-x XMCD file] <track 1> [track 2] ..."),
+        usage=_.USAGE_TRACKTAG,
         version="Python Audio Tools %s" % (audiotools.VERSION))
 
-    text_group = audiotools.OptionGroup(parser, _(u"Text Options"))
+    parser.add_option(
+        '-I', '--interactive',
+        action='store_true',
+        default=False,
+        dest='interactive',
+        help=_.OPT_INTERACTIVE_METADATA)
 
-    for (option, destination, helptext) in [
-        ('--name', 'track_name', _(u"the name of the track")),
-        ('--artist', 'artist_name', _(u'the name of the artist')),
-        ('--performer', 'performer_name', _(u'the name of the performer')),
-        ('--composer', 'composer_name', _(u'the name of the composer')),
-        ('--conductor', 'conductor_name', _(u'the name of the conductor')),
-        ('--album', 'album_name', _(u'the name of the album')),
-        ('--catalog', 'catalog', _(u'the catalog number of the album')),
-        ('--number', 'track_number',
-         _(u"the number of the track in the album")),
-        ('--track-total', 'track_total',
-         _(u"the total number of tracks in the album")),
-        ('--album-number', 'album_number',
-         _(u'the number of the album in a set of albums')),
-        ('--album-total', 'album_total',
-         _(u"the total number of albums in a set of albums")),
-        ('--ISRC', 'ISRC', _(u'the ISRC of the track')),
-        ('--publisher', 'publisher', _(u'the publisher of the album')),
-        ('--media-type', 'media_type',
-         _(u'the media type of the album, such as "CD"')),
-        ('--year', 'year', _(u'the year of release')),
-        ('--date', 'date', _(u'the date of recording')),
-        ('--copyright', 'copyright', _(u'copyright information')),
-        ('--comment', 'comment', _(u'a text comment'))]:
-        if (destination not in audiotools.MetaData.__INTEGER_FIELDS__):
-            text_group.add_option(option,
-                                  action='store',
-                                  type='string',
-                                  dest=destination,
-                                  help=helptext)
-        else:
-            text_group.add_option(option,
-                                  action='store',
-                                  type='int',
-                                  dest=destination,
-                                  help=helptext)
+    text_group = audiotools.OptionGroup(parser, _.OPT_CAT_TEXT)
+
+    for field in audiotools.MetaData.FIELD_ORDER:
+        if (field in UPDATE_OPTIONS):
+            variable = "update_%s" % (field)
+            (option, help_text) = UPDATE_OPTIONS[field]
+            text_group.add_option(
+                option,
+                action='store',
+                type='string' if field not in
+                audiotools.MetaData.INTEGER_FIELDS else 'int',
+                dest=variable,
+                metavar='STRING' if field not in
+                audiotools.MetaData.INTEGER_FIELDS else 'INT',
+                help=help_text)
 
     text_group.add_option(
         '--comment-file',
@@ -185,7 +200,7 @@ if (__name__ == '__main__'):
         type='string',
         dest='comment_file',
         metavar='FILENAME',
-        help=_(u'a file containing comment text'))
+        help=_.OPT_TRACKTAG_COMMENT_FILE)
 
     parser.add_option_group(text_group)
 
@@ -194,105 +209,83 @@ if (__name__ == '__main__'):
         action='store_true',
         default=False,
         dest='replace',
-        help=_(u'completely replace all metadata'))
+        help=_.OPT_TRACKTAG_REPLACE)
 
-    parser.add_option(
-        '-x', '--xmcd',
-        action='store',
-        type='string',
-        dest='xmcd',
-        metavar='FILENAME',
-        help=_(u'FreeDB XMCD file or MusicBrainz XML file'))
+    remove_group = audiotools.OptionGroup(parser, _.OPT_CAT_REMOVAL)
 
-    parser.add_option(
-        '--cue',
-        action='store',
-        type='string',
-        dest='cue',
-        metavar='FILENAME',
-        help=_(u'a cuesheet to import or get audio metadata from'))
-
-    img_group = audiotools.OptionGroup(parser, _(u"Image Options"))
-
-    img_group.add_option(
-        '--remove-images',
-        action='store_true',
-        default=False,
-        dest='remove_images',
-        help=_(u'remove existing images prior to adding new ones'))
-
-    for (option, destination, helptext) in [
-        ('--front-cover', 'front_cover',
-         _(u'an image file of the front cover')),
-        ('--back-cover', 'back_cover',
-         _(u'an image file of the back cover')),
-        ('--leaflet', 'leaflet', _(u'an image file of a leaflet page')),
-        ('--media', 'media', _(u'an image file of the media')),
-        ('--other-image', 'other_image',
-         _(u'an image file related to the track'))]:
-        img_group.add_option(
-            option,
-            action='append',
-            type='string',
-            dest=destination,
-            metavar='FILENAME',
-            help=helptext)
-
-    img_group.add_option(
-        '-T', '--thumbnail',
-        action='store_true',
-        default=False,
-        dest='thumbnail',
-        help=_(u'convert given images to smaller thumbnails ' +
-               u'before adding'))
-
-    parser.add_option_group(img_group)
-
-    remove_group = audiotools.OptionGroup(parser, _(u"Removal Options"))
-
-    for (option, destination, helptext) in [
-        ('--remove-name', 'remove_track_name', _(u'remove track name')),
-        ('--remove-artist', 'remove_artist_name', _(u'remove track artist')),
-        ('--remove-performer', 'remove_performer_name',
-         _(u'remove track performer')),
-        ('--remove-composer', 'remove_composer_name',
-         _(u'remove track composer')),
-        ('--remove-conductor', 'remove_conductor_name',
-         _(u'remove track conductor')),
-        ('--remove-album', 'remove_album_name', _(u'remove album name')),
-        ('--remove-catalog', 'remove_catalog', _(u'remove catalog number')),
-        ('--remove-number', 'remove_track_number',
-         _(u'remove track number')),
-        ('--remove-track-total', 'remove_track_total',
-         _(u'remove total number of tracks')),
-        ('--remove-album-number', 'remove_album_number',
-         _(u'remove album number')),
-        ('--remove-album-total', 'remove_album_total',
-         _(u'remove total number of albums')),
-        ('--remove-ISRC', 'remove_ISRC', _(u'remove ISRC')),
-        ('--remove-publisher', 'remove_publisher', _(u'remove publisher')),
-        ('--remove-media-type', 'remove_media_type',
-         _(u'remove album\'s media type')),
-        ('--remove-year', 'remove_year', _(u'remove release year')),
-        ('--remove-date', 'remove_date', _(u'remove recording date')),
-        ('--remove-copyright', 'remove_copyright',
-         _(u'remove copyright information')),
-        ('--remove-comment', 'remove_comment', _(u'remove text comment'))]:
-        remove_group.add_option(
-            option,
-            action='store_true',
-            default=False,
-            dest=destination,
-            help=helptext)
+    for field in audiotools.MetaData.FIELD_ORDER:
+        if (field in REMOVE_OPTIONS):
+            variable = "remove_%s" % (field)
+            (option, help_text) = REMOVE_OPTIONS[field]
+            remove_group.add_option(
+                option,
+                action='store_true',
+                default=False,
+                dest=variable,
+                help=help_text)
 
     parser.add_option_group(remove_group)
+
+    lookup = audiotools.OptionGroup(parser, _.OPT_CAT_CD_LOOKUP)
+
+    lookup.add_option(
+        '-M', '--metadata-lookup', action='store_true',
+        default=False, dest='metadata_lookup',
+        help=_.OPT_METADATA_LOOKUP)
+
+    lookup.add_option(
+        '--musicbrainz-server', action='store',
+        type='string', dest='musicbrainz_server',
+        default=audiotools.MUSICBRAINZ_SERVER,
+        metavar='HOSTNAME')
+    lookup.add_option(
+        '--musicbrainz-port', action='store',
+        type='int', dest='musicbrainz_port',
+        default=audiotools.MUSICBRAINZ_PORT,
+        metavar='PORT')
+    lookup.add_option(
+        '--no-musicbrainz', action='store_false',
+        dest='use_musicbrainz',
+        default=audiotools.MUSICBRAINZ_SERVICE,
+        help=_.OPT_NO_MUSICBRAINZ)
+
+    lookup.add_option(
+        '--freedb-server', action='store',
+        type='string', dest='freedb_server',
+        default=audiotools.FREEDB_SERVER,
+        metavar='HOSTNAME')
+    lookup.add_option(
+        '--freedb-port', action='store',
+        type='int', dest='freedb_port',
+        default=audiotools.FREEDB_PORT,
+        metavar='PORT')
+    lookup.add_option(
+        '--no-freedb', action='store_false',
+        dest='use_freedb',
+        default=audiotools.FREEDB_SERVICE,
+        help=_.OPT_NO_FREEDB)
+
+    lookup.add_option(
+        '-D', '--default',
+        dest='use_default', action='store_true', default=False,
+        help=_.OPT_DEFAULT)
+
+    parser.add_option_group(lookup)
 
     parser.add_option(
         '--replay-gain',
         action='store_true',
         default=False,
         dest='add_replay_gain',
-        help=_(u'add ReplayGain metadata to track(s)'))
+        help=_.OPT_REPLAY_GAIN_TRACKTAG)
+
+    parser.add_option(
+        '-j', '--joint',
+        action='store',
+        type='int',
+        default=audiotools.MAX_JOBS,
+        dest='max_processes',
+        help=_.OPT_JOINT)
 
     parser.add_option(
         '-V', '--verbose',
@@ -300,213 +293,236 @@ if (__name__ == '__main__'):
         dest='verbosity',
         choices=audiotools.VERBOSITY_LEVELS,
         default=audiotools.DEFAULT_VERBOSITY,
-        help=_(u'the verbosity level to execute at'))
+        help=_.OPT_VERBOSE)
 
     (options, args) = parser.parse_args()
     msg = audiotools.Messenger("tracktag", options)
 
-    audiofiles = audiotools.open_files(args, messenger=msg)
+    #ensure interactive mode is available, if selected
+    if (options.interactive and (not audiotools.ui.AVAILABLE)):
+        audiotools.ui.not_available_message(msg)
+        sys.exit(1)
 
-    if (options.xmcd is not None):
+    #open a --comment-file as UTF-8
+    if (options.comment_file is not None):
         try:
-            xmcd = audiotools.read_metadata_file(options.xmcd)
-        except audiotools.MetaDataFileException, err:
-            msg.error(unicode(err))
-            sys.exit(1)
-    else:
-        xmcd = None
-
-    isrcs = {}
-    import_cuesheet = None
-    if (options.cue is not None):
-        try:
-            cuesheet = audiotools.read_sheet(options.cue)
-
-            #if there's a single audio file
-            #and the cuesheet is sized to fit that file
-            #attempt to embed the cuesheet in the file
-            if ((len(audiofiles) == 1) and
-                (list(cuesheet.pcm_lengths(
-                            audiofiles[0].total_frames()))[-1] > 0)):
-                import_cuesheet = cuesheet
-            else:
-                #otherwise, treat the cuesheet is a source of ISRC data
-                isrcs = dict([(k, v.decode('ascii', 'replace'))
-                              for (k, v) in
-                              cuesheet.ISRCs().items()])
-        except audiotools.SheetException, err:
-            msg.error(unicode(err))
-            sys.exit(1)
-
-    if (options.replace):
-        if (xmcd is None):
-            metadata_function = blank_metadata
-        else:
-            metadata_function = xmcd_metadata
-        cuesheet_function = replace_cuesheet
-    else:
-        if (xmcd is None):
-            metadata_function = track_metadata
-        else:
-            metadata_function = xmcd_track_metadata
-        cuesheet_function = noreplace_cuesheet
-
-    if (options.thumbnail):
-        if (not audiotools.can_thumbnail()):
-            msg.error(_(u"Unable to generate thumbnails"))
-            msg.info(
-                _(u"Please install the Python Imaging Library"))
-            msg.info(
-                _(u"available at http://www.pythonware.com/products/pil/"))
-            msg.info(_(u"to enable image resizing"))
-            sys.exit(1)
-
-        if (audiotools.THUMBNAIL_FORMAT.upper() not in
-            audiotools.thumbnail_formats()):
-            msg.error(_(u"Unsupported thumbnail format \"%s\"") %
-                      (audiotools.THUMBNAIL_FORMAT))
-            msg.info(_(u"Available formats are: %s") %
-                     (", ".join(audiotools.thumbnail_formats())))
-            sys.exit(1)
-
-        get_image = get_thumbnailed_image
-    else:
-        get_image = get_raw_image
-
-    for file in audiofiles:
-        #our command-line built MetaData block,
-        #which takes precedence over the others
-        metadata = audiotools.MetaData()
-
-        if (file.track_number() in isrcs.keys()):
-            metadata.ISRC = isrcs[file.track_number()]
-
-        for field in ('track_name',
-                      'artist_name',
-                      'performer_name',
-                      'composer_name',
-                      'conductor_name',
-                      'album_name',
-                      'catalog',
-                      'track_number',
-                      'track_total',
-                      'album_number',
-                      'album_total',
-                      'ISRC',
-                      'publisher',
-                      'media_type',
-                      'year',
-                      'date',
-                      'copyright',
-                      'comment'):
-            if (getattr(options, field) is not None):
-                attr = getattr(options, field)
-                if (isinstance(attr, str)):
-                    attr = attr.decode(audiotools.IO_ENCODING,
-                                       'replace')
-                setattr(metadata, field, attr)
-
-        if (options.comment_file is not None):
-            metadata.comment = read_comment(options.comment_file, msg)
-
-        #our MetaData block built from the existing file
-        #and any given XMCD file
-        track_metadata = metadata_function(file, xmcd)
-
-        #our cuesheet block built from any given cuesheet file
-        track_cuesheet = cuesheet_function(file, import_cuesheet)
-
-        #transfer images from old MetaData block
-        #and from command-line options
-        try:
-            if (metadata.supports_images()):
-                if (track_metadata is not None):
-                    if (not options.remove_images):
-                        for i in track_metadata.images():
-                            metadata.add_image(i)
-                    else:
-                        for i in track_metadata.images():
-                            track_metadata.delete_image(i)
-
-                if (options.front_cover is not None):
-                    for path in options.front_cover:
-                        metadata.add_image(get_image(path, 0))
-
-                if (options.leaflet is not None):
-                    for path in options.leaflet:
-                        metadata.add_image(get_image(path, 2))
-
-                if (options.back_cover is not None):
-                    for path in options.back_cover:
-                        metadata.add_image(get_image(path, 1))
-
-                if (options.media is not None):
-                    for path in options.media:
-                        metadata.add_image(get_image(path, 3))
-
-                if (options.other_image is not None):
-                    for path in options.other_image:
-                        metadata.add_image(get_image(path, 4))
-        except audiotools.InvalidImage, err:
-            msg.error(_(u"%(filename)s: %(message)s") % \
-                          {"filename": msg.filename(file.filename),
-                           "message": unicode(err)})
-            sys.exit(1)
-
-        if (track_metadata is not None):
-            #remove attributes from old MetaData
-            for field in ('track_name',
-                          'artist_name',
-                          'performer_name',
-                          'composer_name',
-                          'conductor_name',
-                          'album_name',
-                          'catalog',
-                          'track_number',
-                          'track_total',
-                          'album_number',
-                          'album_total',
-                          'ISRC',
-                          'publisher',
-                          'media_type',
-                          'year',
-                          'date',
-                          'copyright',
-                          'comment'):
-                if (getattr(options, 'remove_' + field)):
-                    delattr(track_metadata, field)
-
-            metadata = track_metadata.__class__.converted(metadata)
-            metadata.merge(track_metadata)
-
-        try:
-            file.set_metadata(metadata)
-            if (track_cuesheet is not None):
-                file.set_cuesheet(track_cuesheet)
+            comment_file = open(options.comment_file,
+                                "rb").read().decode('utf-8', 'replace')
         except IOError:
-            msg.error(_(u"Unable to modify \"%s\"") % \
-                          msg.filename(file.filename))
+            msg.error(_.ERR_TRACKTAG_COMMENT_IOERROR %
+                      (audiotools.Filename(options.comment_file),))
             sys.exit(1)
 
-    #we're assuming all tracks are the same type
-    #add_replay_gain should check if they are not
-    if (options.add_replay_gain and
-        (len(audiofiles) > 0) and
-        (audiofiles[0].can_add_replay_gain())):
-
-        rg_progress = audiotools.ReplayGainProgressDisplay(
-            msg, audiofiles[0].lossless_replay_gain())
-        rg_progress.initial_message()
-        try:
-            #separate encoded files by album_name and album_number
-            for album in audiotools.group_tracks(audiofiles):
-                #add ReplayGain to groups of files
-                #belonging to the same album
-
-                album[0].add_replay_gain([a.filename for a in album],
-                                         rg_progress.update)
-        except ValueError, err:
-            rg_progress.clear()
-            msg.error(unicode(err))
+        if (((comment_file.count(u"\uFFFD") * 100) /
+             len(comment_file)) >= 10):
+            msg.error(_.ERR_TRACKTAG_COMMENT_NOT_UTF8 %
+                      (audiotools.Filename(options.comment_file),))
             sys.exit(1)
-        rg_progress.final_message()
+    else:
+        comment_file = None
+
+    #open our set of input files for tagging
+    try:
+        tracks = audiotools.open_files(args,
+                                       messenger=msg,
+                                       no_duplicates=True)
+    except audiotools.DuplicateFile, err:
+        msg.error(_.ERR_DUPLICATE_FILE % (err.filename,))
+        sys.exit(1)
+
+    if (len(tracks) == 0):
+        msg.error(_.ERR_1_FILE_REQUIRED)
+        sys.exit(1)
+
+    if (not options.metadata_lookup):
+        #if not performing metadata lookup,
+        #build fresh MetaData objects
+        #and tag them all simultaneously
+        input_albums = [(tracks,
+                         [t.get_metadata() for t in tracks],
+                         [[audiotools.MetaData() for t in tracks]])]
+    else:
+        #if performining metadata lookup,
+        #get initial metadata from CD lookup service
+        #for each album in set of tracks
+        #and tag them album-by-album
+        input_albums = []
+        for album_tracks in audiotools.group_tracks(tracks):
+            track_metadatas = [t.get_metadata() for t in album_tracks]
+
+            metadata_choices = audiotools.track_metadata_lookup(
+                audiofiles=album_tracks,
+                musicbrainz_server=options.musicbrainz_server,
+                musicbrainz_port=options.musicbrainz_port,
+                freedb_server=options.freedb_server,
+                freedb_port=options.freedb_port,
+                use_musicbrainz=options.use_musicbrainz,
+                use_freedb=options.use_freedb)
+
+            if (not options.interactive):
+                #if interactive mode not indicated,
+                #have user pick choice right away
+                metadata_choices = [
+                    audiotools.ui.select_metadata(
+                        metadata_choices, msg, options.use_default)]
+            else:
+                #otherwise, add tracks' original metadatas
+                #to list of possibilities
+                metadata_choices.insert(0, track_metadatas)
+
+            input_albums.append((album_tracks,
+                                 track_metadatas,
+                                 metadata_choices))
+
+    #a list of (tracks, old_metadatas, new_metadatas) tuples
+    #to apply once all interactive widgets have finished
+    to_tag = []
+
+    for (last_album,
+         (album_tracks,
+          album_track_metadatas,
+          album_metadata_choices)) in audiotools.iter_last(iter(input_albums)):
+        #if not replacing all metadata
+        #merge metadata with that from original files, if any
+        #where new values take precedence over old ones
+        if (not options.replace):
+            for choice in album_metadata_choices:
+                for (new_metadata,
+                     old_metadata) in zip(choice, album_track_metadatas):
+                    if (old_metadata is not None):
+                        for (attr, value) in new_metadata.empty_fields():
+                            setattr(new_metadata, attr,
+                                    getattr(old_metadata, attr))
+
+        for choice in album_metadata_choices:
+            for metadata in choice:
+                #apply field removal options across all metadata choices
+                for attr in audiotools.MetaData.FIELD_ORDER:
+                    if (getattr(options, "remove_%s" % (attr))):
+                        delattr(metadata, attr)
+
+                #apply field addition options across all metadata choices
+                for attr in audiotools.MetaData.FIELD_ORDER:
+                    if (getattr(options, "update_%s" % (attr)) is not None):
+                        value = getattr(options, "update_%s" % (attr))
+                        setattr(metadata,
+                                attr,
+                                value.decode(audiotools.FS_ENCODING)
+                                if (attr not in
+                                    audiotools.MetaData.INTEGER_FIELDS)
+                                else value)
+
+                #apply comment file across all metadata choices
+                if (comment_file is not None):
+                    metadata.comment = comment_file
+
+        if (options.interactive):
+            #if interactive mode indicated, edit metadata choices in widget
+            widget = Tracktag(album_tracks,
+                              album_metadata_choices,
+                              last_album)
+            loop = audiotools.ui.urwid.MainLoop(
+                widget,
+                audiotools.ui.style(),
+                unhandled_input=widget.handle_text)
+            try:
+                loop.run()
+                msg.ansi_clearscreen()
+            except (termios.error, IOError):
+                msg.error(_.ERR_TERMIOS_ERROR)
+                msg.info(_.ERR_TERMIOS_SUGGESTION)
+                msg.info(audiotools.ui.xargs_suggestion(sys.argv))
+                sys.exit(1)
+
+            if (not widget.cancelled()):
+                to_tag.append((album_tracks,
+                               album_track_metadatas,
+                               list(widget.populated_metadata())))
+            else:
+                sys.exit(0)
+        else:
+            #if interactive mode not indicated, use first choice
+            #since all other choices have been culled already
+            to_tag.append((album_tracks,
+                           album_track_metadatas,
+                           album_metadata_choices[0]))
+
+    #once all final output metadata is set,
+    #perform actual tagging
+    for (album_tracks, old_metadatas, new_metadatas) in to_tag:
+        if (not options.replace):
+            #apply final metadata to tracks using update_metadata
+            #if no replacement
+            for (old_metadata,
+                 (track,
+                  new_metadata)) in zip(old_metadatas,
+                                        zip(album_tracks, new_metadatas)):
+                if (old_metadata is not None):
+                    #merge new fields with old fields
+                    field_updated = False
+                    for (attr, value) in new_metadata.fields():
+                        if (getattr(old_metadata,
+                                    attr) != getattr(new_metadata,
+                                                     attr)):
+                            setattr(old_metadata, attr, value)
+                            field_updated = True
+
+                    if (field_updated):
+                        #update track if at least one field has changed
+                        try:
+                            track.update_metadata(old_metadata)
+                        except IOError, err:
+                            msg.error(
+                                _.ERR_ENCODING_ERROR %
+                                (audiotools.Filename(track.filename),))
+                            sys.exit(1)
+                else:
+                    try:
+                        track.set_metadata(new_metadata)
+                    except IOError, err:
+                        msg.error(_.ERR_ENCODING_ERROR %
+                                  (audiotools.Filename(track.filename),))
+                        sys.exit(1)
+        else:
+            #apply final metadata to tracks
+            #using set_metadata() if replacement
+            for (track, metadata) in zip(album_tracks, new_metadatas):
+                try:
+                    track.set_metadata(metadata)
+                except IOError, err:
+                    msg.error(_.ERR_ENCODING_ERROR %
+                              (audiotools.Filename(track.filename),))
+                    sys.exit(1)
+
+    #add ReplayGain to tracks, if indicated
+    queue = audiotools.ExecProgressQueue(
+        audiotools.ProgressDisplay(msg))
+
+    for album_tracks in audiotools.group_tracks(tracks):
+        if (options.add_replay_gain and (len(album_tracks) > 0)):
+            album_number = set([t.album_number() for t in album_tracks]).pop()
+            audio_type = album_tracks[0].__class__
+
+            if (audio_type.can_add_replay_gain(album_tracks)):
+                #FIXME - should pull ReplayGain text
+                #from elsewhere
+                queue.execute(
+                    audio_type.add_replay_gain,
+                    (u"%s ReplayGain%s" %
+                     ((u"Adding" if audio_type.lossless_replay_gain() else
+                       u"Applying"),
+                      (u"" if album_number is None else
+                       (u" to album %d" % (album_number))))),
+                    (u"ReplayGain %s%s" %
+                     ((u"added" if audio_type.lossless_replay_gain() else
+                       u"applied"),
+                      (u"" if album_number is None else
+                       (u" to album %d" % (album_number))))),
+                    [a.filename for a in album_tracks])
+
+    #execute ReplayGain addition once all tracks have been tagged
+    try:
+        queue.run(options.max_processes)
+    except ValueError, err:
+        msg.error(unicode(err))
+        sys.exit(1)

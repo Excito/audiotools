@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 #Audio Tools, a module and set of tools for manipulating audio data
-#Copyright (C) 2007-2011  Brian Langenberger
+#Copyright (C) 2007-2012  Brian Langenberger
 
 #This program is free software; you can redistribute it and/or modify
 #it under the terms of the GNU General Public License as published by
@@ -29,13 +29,14 @@ import decimal
 import test_streams
 import cStringIO
 import subprocess
-from audiotools import Con
 
 parser = ConfigParser.SafeConfigParser()
 parser.read("test.cfg")
 
+
 def do_nothing(self):
     pass
+
 
 #add a bunch of decorator metafunctions like LIB_CORE
 #which can be wrapped around individual tests as needed
@@ -47,6 +48,7 @@ for section in parser.sections():
         else:
             vars()["%s_%s" % (section.upper(),
                               option.upper())] = lambda function: do_nothing
+
 
 class BLANK_PCM_Reader:
     def __init__(self, length,
@@ -67,30 +69,31 @@ class BLANK_PCM_Reader:
         self.single_pcm_frame = audiotools.pcm.from_list(
             [1] * channels, channels, bits_per_sample, True)
 
-    def read(self, bytes):
+    def read(self, pcm_frames):
         if (self.total_frames > 0):
             frame = audiotools.pcm.from_frames(
                 [self.single_pcm_frame] *
-                min(self.single_pcm_frame.frame_count(bytes) / self.channels,
-                    self.total_frames))
+                min(pcm_frames, self.total_frames))
             self.total_frames -= frame.frames
             return frame
         else:
             return audiotools.pcm.FrameList(
                 "", self.channels, self.bits_per_sample, True, True)
 
+    def read_error(self, pcm_frames):
+        raise ValueError("unable to read closed stream")
+
     def close(self):
-        pass
+        self.read = self.read_error
 
     def reset(self):
         self.total_frames = self.original_frames
 
+
 class RANDOM_PCM_Reader(BLANK_PCM_Reader):
-    def read(self, bytes):
+    def read(self, pcm_frames):
         if (self.total_frames > 0):
-            frames_to_read = min(
-                self.single_pcm_frame.frame_count(bytes) / self.channels,
-                self.total_frames)
+            frames_to_read = min(pcm_frames, self.total_frames)
             frame = audiotools.pcm.FrameList(
                 os.urandom(frames_to_read *
                            (self.bits_per_sample / 8) *
@@ -104,6 +107,7 @@ class RANDOM_PCM_Reader(BLANK_PCM_Reader):
         else:
             return audiotools.pcm.FrameList(
                 "", self.channels, self.bits_per_sample, True, True)
+
 
 class EXACT_BLANK_PCM_Reader(BLANK_PCM_Reader):
     def __init__(self, pcm_frames,
@@ -123,6 +127,7 @@ class EXACT_BLANK_PCM_Reader(BLANK_PCM_Reader):
         self.single_pcm_frame = audiotools.pcm.from_list(
             [1] * channels, channels, bits_per_sample, True)
 
+
 class EXACT_SILENCE_PCM_Reader(BLANK_PCM_Reader):
     def __init__(self, pcm_frames,
                  sample_rate=44100, channels=2, bits_per_sample=16,
@@ -140,6 +145,7 @@ class EXACT_SILENCE_PCM_Reader(BLANK_PCM_Reader):
 
         self.single_pcm_frame = audiotools.pcm.from_list(
             [0] * channels, channels, bits_per_sample, True)
+
 
 class EXACT_RANDOM_PCM_Reader(RANDOM_PCM_Reader):
     def __init__(self, pcm_frames,
@@ -159,6 +165,7 @@ class EXACT_RANDOM_PCM_Reader(RANDOM_PCM_Reader):
         self.single_pcm_frame = audiotools.pcm.from_list(
             [1] * channels, channels, bits_per_sample, True)
 
+
 class MD5_Reader:
     def __init__(self, pcmreader):
         self.pcmreader = pcmreader
@@ -168,8 +175,18 @@ class MD5_Reader:
         self.bits_per_sample = pcmreader.bits_per_sample
         self.md5 = md5()
 
-    def read(self, bytes):
-        framelist = self.pcmreader.read(bytes)
+    def reset(self):
+        if (hasattr(self.pcmreader, "reset")):
+            self.pcmreader.reset()
+        self.md5 = md5()
+
+    def __repr__(self):
+        return "MD5Reader(%s,%s,%s)" % (self.sample_rate,
+                                        self.channels,
+                                        self.bits_per_sample)
+
+    def read(self, pcm_frames):
+        framelist = self.pcmreader.read(pcm_frames)
         self.md5.update(framelist.to_bytes(False, True))
         return framelist
 
@@ -194,7 +211,7 @@ class Variable_Reader:
         self.range = range(self.channels * (self.bits_per_sample / 8),
                            4096)
 
-    def read(self, bytes):
+    def read(self, pcm_frames):
         return self.pcmreader.read(random.choice(self.range))
 
     def close(self):
@@ -218,9 +235,9 @@ class Join_Reader:
         self.bits_per_sample = pcm_readers[0].bits_per_sample
         self.readers = map(audiotools.BufferedPCMReader, pcm_readers)
 
-    def read(self, bytes):
+    def read(self, pcm_frames):
         return audiotools.pcm.from_channels(
-            [r.read(bytes) for r in self.readers])
+            [r.read(pcm_frames) for r in self.readers])
 
     def close(self):
         for r in self.readers:
@@ -236,7 +253,7 @@ class MiniFrameReader:
         self.bits_per_sample = bits_per_sample
         self.pcm_frames = zip(*channel_data)
 
-    def read(self, bytes):
+    def read(self, pcm_frames):
         try:
             return audiotools.pcm.from_list(self.pcm_frames.pop(0),
                                             self.channels,
@@ -247,6 +264,7 @@ class MiniFrameReader:
                                             self.channels,
                                             self.bits_per_sample,
                                             True, True)
+
     def close(self):
         self.pcm_frames = []
 
@@ -274,11 +292,6 @@ class FrameCounter:
                           (self.bits_per_sample / 8) *
                           self.sample_rate)))
 
-def run_analysis(pcmreader):
-    f = pcmreader.analyze_frame()
-    while (f is not None):
-        f = pcmreader.analyze_frame()
-
 
 #probstat does this better, but I don't want to require that
 #for something used only rarely
@@ -289,6 +302,16 @@ def Combinations(items, n):
         for i in xrange(len(items)):
             for combos in Combinations(items[i + 1:], n - 1):
                 yield [items[i]] + combos
+
+
+def Possibilities(*lists):
+    if (len(lists) == 0):
+        yield ()
+    else:
+        remainder = list(Possibilities(*lists[1:]))
+        for item in lists[0]:
+            for rem in remainder:
+                yield (item,) + rem
 
 
 from_channels = audiotools.ChannelMask.from_channels

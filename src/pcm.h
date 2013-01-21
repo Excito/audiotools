@@ -10,7 +10,7 @@ typedef int Py_ssize_t;
 
 /********************************************************
  Audio Tools, a module and set of tools for manipulating audio data
- Copyright (C) 2007-2011  Brian Langenberger
+ Copyright (C) 2007-2012  Brian Langenberger
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -33,7 +33,6 @@ typedef int Py_ssize_t;
 #endif
 
 #include <stdint.h>
-#include "array.h"
 
 /******************
   FrameList Object
@@ -43,17 +42,17 @@ typedef int Py_ssize_t;
 typedef struct {
     PyObject_HEAD;
 
-    int frames;          /*the total number of PCM frames in this FrameList
+    unsigned int frames; /*the total number of PCM frames in this FrameList
                            aka the total number of rows in the "samples" array*/
-    int channels;        /*the total number of channels in this FrameList
-                           aka the total number of columns in "samples*/
-    int bits_per_sample; /*the maximum size of each sample, in bits*/
+    unsigned int channels; /*the total number of channels in this FrameList
+                             aka the total number of columns in "samples*/
+    unsigned int bits_per_sample; /*the maximum size of each sample, in bits*/
 
-    ia_data_t* samples;    /*the actual sample data itself,
-                             stored raw as 32-bit signed integers*/
-    ia_size_t samples_length; /*the total number of samples
-                                which must be evenly distributable
-                                between channels and bits-per-sample*/
+    int* samples;            /*the actual sample data itself,
+                               stored raw as 32-bit signed integers*/
+    unsigned samples_length; /*the total number of samples
+                               which must be evenly distributable
+                               between channels and bits-per-sample*/
 } pcm_FrameList;
 
 void
@@ -118,6 +117,15 @@ PyObject*
 FrameList_concat(pcm_FrameList *a, PyObject *bb);
 
 PyObject*
+FrameList_repeat(pcm_FrameList *a, Py_ssize_t i);
+
+PyObject*
+FrameList_inplace_concat(pcm_FrameList *a, PyObject *bb);
+
+PyObject*
+FrameList_inplace_repeat(pcm_FrameList *a, Py_ssize_t i);
+
+PyObject*
 FrameList_from_list(PyObject *dummy, PyObject *args);
 
 PyObject*
@@ -125,6 +133,10 @@ FrameList_from_frames(PyObject *dummy, PyObject *args);
 
 PyObject*
 FrameList_from_channels(PyObject *dummy, PyObject *args);
+
+/*for use with the PyArg_ParseTuple function*/
+int
+FrameList_converter(PyObject* obj, void** framelist);
 
 
 /***********************
@@ -134,14 +146,14 @@ FrameList_from_channels(PyObject *dummy, PyObject *args);
 typedef struct {
     PyObject_HEAD;
 
-    int frames;          /*the total number of PCM frames in this FrameList
+    unsigned int frames; /*the total number of PCM frames in this FrameList
                            aka the total number of rows in the "samples" array*/
-    int channels;        /*the total number of channels in this FrameList
-                           aka the total number of columns in "samples*/
+    unsigned int channels; /*the total number of channels in this FrameList
+                             aka the total number of columns in "samples*/
 
-    fa_data_t *samples;  /*the actual sample data itself,
-                           stored raw as doubles*/
-    fa_size_t samples_length; /*the total number of samples
+    double *samples;          /*the actual sample data itself,
+                                stored raw as doubles*/
+    unsigned samples_length;  /*the total number of samples
                                 which must be evenly distributable
                                 between channels*/
 } pcm_FloatFrameList;
@@ -192,20 +204,33 @@ PyObject*
 FloatFrameList_concat(pcm_FloatFrameList *a, PyObject *bb);
 
 PyObject*
+FloatFrameList_repeat(pcm_FloatFrameList *a, Py_ssize_t i);
+
+PyObject*
+FloatFrameList_inplace_concat(pcm_FloatFrameList *a, PyObject *bb);
+
+PyObject*
+FloatFrameList_inplace_repeat(pcm_FloatFrameList *a, Py_ssize_t i);
+
+PyObject*
 FloatFrameList_from_frames(PyObject *dummy, PyObject *args);
 
 PyObject*
 FloatFrameList_from_channels(PyObject *dummy, PyObject *args);
 
+/*for use with the PyArg_ParseTuple function*/
+int
+FloatFrameList_converter(PyObject* obj, void** floatframelist);
+
 #endif
 
-typedef ia_data_t (*FrameList_char_to_int_converter)(unsigned char *s);
+typedef int (*FrameList_char_to_int_converter)(unsigned char *s);
 
 void
-FrameList_char_to_samples(ia_data_t *samples,
+FrameList_char_to_samples(int *samples,
                           unsigned char *data,
                           FrameList_char_to_int_converter converter,
-                          ia_size_t samples_length,
+                          unsigned samples_length,
                           int bits_per_sample);
 
 FrameList_char_to_int_converter
@@ -213,44 +238,44 @@ FrameList_get_char_to_int_converter(int bits_per_sample,
                                     int is_big_endian,
                                     int is_signed);
 
-ia_data_t
+int
 FrameList_S8_char_to_int(unsigned char *s);
 
-ia_data_t
+int
 FrameList_U8_char_to_int(unsigned char *s);
 
-ia_data_t
+int
 FrameList_SL16_char_to_int(unsigned char *s);
 
-ia_data_t
+int
 FrameList_SB16_char_to_int(unsigned char *s);
 
-ia_data_t
+int
 FrameList_UL16_char_to_int(unsigned char *s);
 
-ia_data_t
+int
 FrameList_UB16_char_to_int(unsigned char *s);
 
-ia_data_t
+int
 FrameList_SL24_char_to_int(unsigned char *s);
 
-ia_data_t
+int
 FrameList_SB24_char_to_int(unsigned char *s);
 
-ia_data_t
+int
 FrameList_UL24_char_to_int(unsigned char *s);
 
-ia_data_t
+int
 FrameList_UB24_char_to_int(unsigned char *s);
 
 
-typedef void (*FrameList_int_to_char_converter)(ia_data_t i, unsigned char *s);
+typedef void (*FrameList_int_to_char_converter)(int i, unsigned char *s);
 
 void
 FrameList_samples_to_char(unsigned char *data,
-                          ia_data_t *samples,
+                          int *samples,
                           FrameList_int_to_char_converter converter,
-                          ia_size_t samples_length,
+                          unsigned samples_length,
                           int bits_per_sample);
 
 FrameList_int_to_char_converter
@@ -259,33 +284,33 @@ FrameList_get_int_to_char_converter(int bits_per_sample,
                                     int is_signed);
 
 void
-FrameList_int_to_S8_char(ia_data_t i, unsigned char *s);
+FrameList_int_to_S8_char(int i, unsigned char *s);
 
 void
-FrameList_int_to_U8_char(ia_data_t i, unsigned char *s);
+FrameList_int_to_U8_char(int i, unsigned char *s);
 
 void
-FrameList_int_to_UB16_char(ia_data_t i, unsigned char *s);
+FrameList_int_to_UB16_char(int i, unsigned char *s);
 
 void
-FrameList_int_to_SB16_char(ia_data_t i, unsigned char *s);
+FrameList_int_to_SB16_char(int i, unsigned char *s);
 
 void
-FrameList_int_to_UL16_char(ia_data_t i, unsigned char *s);
+FrameList_int_to_UL16_char(int i, unsigned char *s);
 
 void
-FrameList_int_to_SL16_char(ia_data_t i, unsigned char *s);
+FrameList_int_to_SL16_char(int i, unsigned char *s);
 
 void
-FrameList_int_to_UB24_char(ia_data_t i, unsigned char *s);
+FrameList_int_to_UB24_char(int i, unsigned char *s);
 
 void
-FrameList_int_to_SB24_char(ia_data_t i, unsigned char *s);
+FrameList_int_to_SB24_char(int i, unsigned char *s);
 
 void
-FrameList_int_to_UL24_char(ia_data_t i, unsigned char *s);
+FrameList_int_to_UL24_char(int i, unsigned char *s);
 
 void
-FrameList_int_to_SL24_char(ia_data_t i, unsigned char *s);
+FrameList_int_to_SL24_char(int i, unsigned char *s);
 
 #endif

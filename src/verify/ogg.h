@@ -1,6 +1,6 @@
 /********************************************************
  Audio Tools, a module and set of tools for manipulating audio data
- Copyright (C) 2007-2011  Brian Langenberger
+ Copyright (C) 2007-2012  Brian Langenberger
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -31,10 +31,4 @@ struct ogg_header {
 };
 
 status
-verifymodule_read_ogg_header(Bitstream *bs, struct ogg_header *header);
-
-void
-verifymodule_print_ogg_header(struct ogg_header *header);
-
-void
-verifymodule_ogg_checksum(uint8_t byte, void *checksum);
+verifymodule_read_ogg_header(BitstreamReader *bs, struct ogg_header *header);

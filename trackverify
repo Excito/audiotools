@@ -1,7 +1,7 @@
 #!/usr/bin/python
 
 #Audio Tools, a module and set of tools for manipulating audio data
-#Copyright (C) 2007-2011  Brian Langenberger
+#Copyright (C) 2007-2012  Brian Langenberger
 
 #This program is free software; you can redistribute it and/or modify
 #it under the terms of the GNU General Public License as published by
@@ -20,9 +20,7 @@
 import sys
 import os.path
 import audiotools
-import gettext
-
-gettext.install("audiotools", unicode=True)
+import audiotools.text as _
 
 MAX_CPUS = audiotools.MAX_JOBS
 
@@ -39,9 +37,9 @@ class Counter:
 
 
 class FailedAudioFile:
-    def __init__(self, class_name, path, err):
+    def __init__(self, class_name, filename, err):
         self.NAME = class_name
-        self.filename = path
+        self.filename = filename
         self.err = err
 
     def verify(self):
@@ -49,53 +47,54 @@ class FailedAudioFile:
 
 
 def open_file(filename):
+    #this is much like audiotools.open
+    #except that file init errors fail differently
+
     f = open(filename, "rb")
     try:
-        for audioclass in audiotools.TYPE_MAP.values():
-            f.seek(0, 0)
-            if (audioclass.is_type(f)):
-                class_name = audioclass.NAME
-                try:
-                    return audioclass(filename)
-                except audiotools.InvalidFile, err:
-                    return FailedAudioFile(class_name, filename, err)
+        audio_class = audiotools.file_type(f)
+        if (((audio_class is not None) and
+             (audio_class.has_binaries(audiotools.BIN)))):
+            class_name = audio_class.NAME
+            try:
+                return audio_class(filename)
+            except audiotools.InvalidFile, err:
+                return FailedAudioFile(class_name, filename, err)
         else:
             raise audiotools.UnsupportedFile(filename)
     finally:
         f.close()
 
 
-def get_tracks(args, accept_list):
+def get_tracks(args, queued_files, accept_list=None):
     if (accept_list is not None):
         accept_list = set(accept_list)
 
     for path in args:
         if (os.path.isfile(path)):
             try:
-                track = open_file(path)
-                if not ((accept_list is not None) and
-                        (track.NAME not in accept_list)):
-                    yield track
-            except (audiotools.UnsupportedFile, IOError):
+                filename = audiotools.Filename(path)
+                if (filename not in queued_files):
+                    queued_files.add(filename)
+                    track = open_file(str(filename))
+                    if ((accept_list is None) or (track.NAME in accept_list)):
+                        yield track
+            except (audiotools.UnsupportedFile, IOError, OSError):
                 continue
         elif (os.path.isdir(path)):
             for (d, ds, fs) in os.walk(path):
-                for f in fs:
-                    try:
-                        track = open_file(os.path.join(d, f))
-                        if not ((accept_list is not None) and
-                                (track.NAME not in accept_list)):
-                            yield track
-                    except (audiotools.UnsupportedFile, IOError):
-                        continue
+                for track in get_tracks([os.path.join(d, f) for f in fs],
+                                        queued_files,
+                                        accept_list=accept_list):
+                    yield track
 
 
 def verify(progress, track):
     try:
         track.verify(progress)
-        return (track.filename, track.NAME, None)
+        return (audiotools.Filename(track.filename), track.NAME, None)
     except audiotools.InvalidFile, err:
-        return (track.filename, track.NAME, unicode(err))
+        return (audiotools.Filename(track.filename), track.NAME, unicode(err))
 
 
 class Results:
@@ -105,24 +104,24 @@ class Results:
         self.summary_failure = {}
 
     def display(self, result):
-        (path, track_type, error) = result
+        (filename, track_type, error) = result
         if (error is None):
             self.summary_success.setdefault(track_type, Counter()).increment()
-            return _(u"%(path)s : %(result)s") % {
-                "path": self.msg.filename(path),
-                "result": self.msg.ansi(_(u"OK"), [self.msg.FG_GREEN])}
+            return _.LAB_TRACKVERIFY_RESULT % {
+                "path": filename,
+                "result": self.msg.ansi(_.LAB_TRACKVERIFY_OK,
+                                        [self.msg.FG_GREEN])}
         else:
             self.summary_failure.setdefault(track_type, Counter()).increment()
-            return _(u"%(path)s : %(result)s") % {
-                "path": self.msg.filename(path),
-                "result": self.msg.ansi(error, [self.msg.FG_RED])}
+            return _.LAB_TRACKVERIFY_RESULT % {
+                "path": filename,
+                "result": self.msg.ansi(error,
+                                        [self.msg.FG_RED])}
 
-
-gettext.install("audiotools", unicode=True)
 
 if (__name__ == '__main__'):
     parser = audiotools.OptionParser(
-        usage=_(u"%prog <track 1> [track 2] ..."),
+        usage=_.USAGE_TRACKVERIFY,
         version="Python Audio Tools %s" % (audiotools.VERSION))
 
     parser.add_option('-t', '--type',
@@ -130,40 +129,37 @@ if (__name__ == '__main__'):
                       dest='accept_list',
                       metavar='type',
                       choices=audiotools.TYPE_MAP.keys(),
-                      help=_(u'a type of audio to accept'))
+                      help=_.OPT_TYPE_TRACKVERIFY)
 
     parser.add_option('-R', '--no-summary',
                       action='store_true',
                       dest='no_summary',
-                      help=_(u'suppress summary output'))
+                      help=_.OPT_NO_SUMMARY)
 
     parser.add_option('-j', '--joint',
-        action='store',
-        type='int',
-        default=MAX_CPUS,
-        dest='max_processes',
-        help=_(u'the maximum number of processes to run at a time'))
+                      action='store',
+                      type='int',
+                      default=MAX_CPUS,
+                      dest='max_processes',
+                      help=_.OPT_JOINT)
 
     parser.add_option('-V', '--verbose',
                       action='store',
                       dest='verbosity',
                       choices=audiotools.VERBOSITY_LEVELS,
                       default=audiotools.DEFAULT_VERBOSITY,
-                      help=_(u'the verbosity level to execute at'))
+                      help=_.OPT_VERBOSE)
 
     (options, args) = parser.parse_args()
     msg = audiotools.Messenger("trackverify", options)
 
+    queued_files = set([])  # a set of Filename objects already encountered
     results = Results(msg)
     queue = audiotools.ExecProgressQueue(audiotools.ProgressDisplay(msg))
-    for track in get_tracks(args, options.accept_list):
-        # if (i == 0):
-        #     pass
-        # elif ((i % 100) == 0):
-        #     msg.ansi_clearline()
-        #     msg.partial_output(_(u"Finding tracks (%d)") % (i))
+    for track in get_tracks(args, queued_files, options.accept_list):
         queue.execute(function=verify,
-                      progress_text=msg.filename(track.filename),
+                      progress_text=
+                      unicode(audiotools.Filename(track.filename)),
                       completion_output=results.display,
                       track=track)
     msg.ansi_clearline()
@@ -178,16 +174,16 @@ if (__name__ == '__main__'):
     failure_total = sum(map(int, summary_failure.values()))
 
     if ((len(formats) > 0) and (not options.no_summary)):
-        msg.output(_(u"Results:"))
+        msg.output(_.LAB_TRACKVERIFY_RESULTS)
         msg.output(u"")
         msg.new_row()
-        msg.output_column(_(u"format"), True)
+        msg.output_column(_.LAB_TRACKVERIFY_RESULT_FORMAT, True)
         msg.output_column(u" ")
-        msg.output_column(_(u"success"), True)
+        msg.output_column(_.LAB_TRACKVERIFY_RESULT_SUCCESS, True)
         msg.output_column(u" ")
-        msg.output_column(_(u"failure"), True)
+        msg.output_column(_.LAB_TRACKVERIFY_RESULT_FAILURE, True)
         msg.output_column(u" ")
-        msg.output_column(_(u"total"), True)
+        msg.output_column(_.LAB_TRACKVERIFY_RESULT_TOTAL, True)
         msg.divider_row([u"-", u" ", u"-", u" ", u"-", u" ", u"-"])
 
         for format in formats:

@@ -1,10 +1,10 @@
 #include <Python.h>
-#include "bitstream_r.h"
+#include "bitstream.h"
 #include "verify.h"
 
 /********************************************************
  Audio Tools, a module and set of tools for manipulating audio data
- Copyright (C) 2007-2011  Brian Langenberger
+ Copyright (C) 2007-2012  Brian Langenberger
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -24,10 +24,8 @@
 PyMODINIT_FUNC
 initverify(void)
 {
-    PyObject* m;
-
-    m = Py_InitModule3("verify", module_methods,
-                       "High speed audio format verifiers");
+    Py_InitModule3("verify", module_methods,
+                   "High speed audio format verifiers");
 }
 
 #include "verify/mpeg.c"
