@@ -1,0 +1,26 @@
+Source: audiotools
+Section: python
+Priority: extra
+Maintainer: Carl Fürstenberg <carl@excito.com>
+Build-Depends: debhelper (>= 8.0.0), python-dev
+Standards-Version: 3.9.2
+Homepage: http://audiotools.sourceforge.net
+#Vcs-Git: git://git.debian.org/collab-maint/audiotools.git
+#Vcs-Browser: http://git.debian.org/?p=collab-maint/audiotools.git;a=summary
+
+Package: audiotools
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ${python:Depends}
+Description: collection of audio handling programs
+ Python Audio Tools are a collection of audio handling programs
+ which work from the command line.
+ These include programs for CD extraction,
+ track conversion from one audio format to another,
+ track renaming and retagging, track identification,
+ CD burning from tracks, and more.
+ Supports internationalized track filenames and metadata using Unicode. 
+ Works with high-definition, multi-channel audio as well as CD-quality. 
+ Track conversion uses multiple CPUs or CPU cores if available
+ to greatly speed the transcoding process.
+ Track metadata can be retrieved from FreeDB,
+ MusicBrainz or compatible servers.
