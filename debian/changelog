@@ -1,3 +1,9 @@
+audiotools (2.19-2) unstable; urgency=low
+
+  * add libcdio-dev depends
+
+ -- Carl Fürstenberg <carl@excito.com>  Mon, 21 Jan 2013 17:32:56 +0100
+
 audiotools (2.19-1) precise; urgency=low
 
   * Imported Upstream version 2.19
