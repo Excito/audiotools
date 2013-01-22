@@ -2,7 +2,8 @@ Source: audiotools
 Section: python
 Priority: extra
 Maintainer: Carl Fürstenberg <carl@excito.com>
-Build-Depends: debhelper (>= 8.0.0), python-dev, libcdio-dev, libcdio-cdda-dev, libcdio-paranoia-dev
+Build-Depends: debhelper (>= 8.0.0), python2.7-dev, python-all-dev (>= 2.6.6-3~), libcdio-dev, libcdio-cdda-dev, libcdio-paranoia-dev
+X-Python-Version: >= 2.7
 Standards-Version: 3.9.2
 Homepage: http://audiotools.sourceforge.net
 #Vcs-Git: git://git.debian.org/collab-maint/audiotools.git
